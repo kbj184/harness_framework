@@ -1,0 +1,289 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: CMDB 자산 수집 멀티 에이전트 — CrowdStrike Hosts API 수집기
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  CrowdStrikeSecretName:
+    Type: String
+    Default: cmdb/crowdstrike
+  BackendSecretName:
+    Type: String
+    Default: cmdb/backend-api
+  AwsTargetSecretName:
+    Type: String
+    Default: cmdb/aws-target
+    Description: 수집 대상 AWS 계정 IAM User Access Key (cross-account)
+  DbSecretName:
+    Type: String
+    Default: cmdb/db-writer
+    Description: Aurora PostgreSQL 접속 정보 (rag_embedder 전용)
+  ScheduleExpression:
+    Type: String
+    Default: "rate(1 hour)"
+    Description: EventBridge 스케줄 표현식
+  RagEmbedScheduleExpression:
+    Type: String
+    Default: "cron(55 19 * * ? *)"
+    Description: RAG 임베더 스케줄 (UTC 19:55 = KST 04:55, Perception 배치 04:50 직후)
+  KevScheduleExpression:
+    Type: String
+    Default: "cron(15 18 * * ? *)"
+    Description: KEV 수집 스케줄 (UTC 18:15 = KST 03:15)
+  EpssScheduleExpression:
+    Type: String
+    Default: "cron(30 18 * * ? *)"
+    Description: EPSS 수집 스케줄 (UTC 18:30 = KST 03:30)
+  NvdScheduleExpression:
+    Type: String
+    Default: "cron(45 18 * * ? *)"
+    Description: NVD CVE 수집 스케줄 (UTC 18:45 = KST 03:45)
+  CsAlertsScheduleExpression:
+    Type: String
+    Default: "rate(15 minutes)"
+    Description: CrowdStrike Alerts 수집 스케줄 (실시간 위협)
+
+Resources:
+  CrowdStrikeCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-crowdstrike-collector-${Environment}"
+      Description: CrowdStrike Hosts API에서 디바이스 자산을 수집하여 백엔드에 전송
+      Environment:
+        Variables:
+          CS_SECRET_NAME: !Ref CrowdStrikeSecretName
+          BACKEND_SECRET_NAME: !Ref BackendSecretName
+          BATCH_SIZE: "500"
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${CrowdStrikeSecretName}-*"
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${BackendSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ScheduleExpression
+            Description: CrowdStrike 자산 수집 스케줄
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/crowdstrike/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  AwsEc2CollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-aws-ec2-collector-${Environment}"
+      Description: 대상 AWS 계정의 EC2 인스턴스를 수집하여 백엔드에 전송
+      Environment:
+        Variables:
+          AWS_TARGET_SECRET_NAME: !Ref AwsTargetSecretName
+          BACKEND_SECRET_NAME: !Ref BackendSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AwsTargetSecretName}-*"
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${BackendSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ScheduleExpression
+            Description: AWS EC2 자산 수집 스케줄
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/aws/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  RagEmbedderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-rag-embedder-${Environment}"
+      Description: tb_asset_master x tb_asset_perception -> tb_rag_asset 임베딩 (Bedrock Titan v2)
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+          BEDROCK_REGION: !Ref AWS::Region
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                # Cohere Embed V4 Global cross-region profile + all backing foundation models
+                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/global.cohere.embed-v4:0"
+                - "arn:aws:bedrock:*::foundation-model/cohere.embed-v4:0"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref RagEmbedScheduleExpression
+            Description: RAG 임베딩 일일 배치 (KST 04:55)
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/rag_embedder/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  KevCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-kev-collector-${Environment}"
+      Description: CISA KEV JSON feed → tb_kev_catalog UPSERT
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref KevScheduleExpression
+            Description: KEV 일일 수집 (KST 03:15)
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/kev_collector/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  EpssCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-epss-collector-${Environment}"
+      Description: FIRST EPSS CSV.gz → tb_epss_score UPSERT (대량 ~250K rows)
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref EpssScheduleExpression
+            Description: EPSS 일일 수집 (KST 03:30)
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/epss_collector/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  NvdCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-nvd-collector-${Environment}"
+      Description: NVD CVE 2.0 API → tb_cve_meta + tb_cve_cpe_match + tb_cpe_dictionary
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref NvdScheduleExpression
+            Description: NVD CVE 일일 증분 수집 (KST 03:45)
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/nvd_collector/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  CrowdStrikeAlertsCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-cs-alerts-collector-${Environment}"
+      Description: CrowdStrike Alerts v2 실시간 수집 → tb_cs_alert + asset 매칭
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          CROWDSTRIKE_SECRET_NAME: !Ref CrowdStrikeSecretName
+          DB_SECRET_NAME: !Ref DbSecretName
+          ALERTS_LIMIT: "500"
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${CrowdStrikeSecretName}-*"
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref CsAlertsScheduleExpression
+            Description: CrowdStrike Alerts 15분 주기 수집
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/crowdstrike_alerts/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+Outputs:
+  CrowdStrikeCollectorFunctionArn:
+    Description: CrowdStrike Collector Lambda ARN
+    Value: !GetAtt CrowdStrikeCollectorFunction.Arn
+  CrowdStrikeCollectorFunctionName:
+    Description: CrowdStrike Collector Lambda 함수명
+    Value: !Ref CrowdStrikeCollectorFunction
+  AwsEc2CollectorFunctionArn:
+    Description: AWS EC2 Collector Lambda ARN
+    Value: !GetAtt AwsEc2CollectorFunction.Arn
+  AwsEc2CollectorFunctionName:
+    Description: AWS EC2 Collector Lambda 함수명
+    Value: !Ref AwsEc2CollectorFunction
+  RagEmbedderFunctionArn:
+    Description: RAG Embedder Lambda ARN
+    Value: !GetAtt RagEmbedderFunction.Arn
+  RagEmbedderFunctionName:
+    Description: RAG Embedder Lambda 함수명
+    Value: !Ref RagEmbedderFunction

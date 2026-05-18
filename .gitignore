@@ -1,9 +1,39 @@
-node_modules/
-.next/
-out/
-next-env.d.ts
-tsconfig.tsbuildinfo
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
 
-# phase execution outputs
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# AWS SAM
+.aws-sam/
+
+# Docker
+*.log
+
+# Phase execution outputs
 phases/**/phase*-output.json
 phases/**/step*-output.json
+
+# Test / Coverage
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*

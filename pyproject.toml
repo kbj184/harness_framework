@@ -1,0 +1,44 @@
+[project]
+name = "collect-cmdb"
+version = "0.1.0"
+description = "CMDB 자산 수집 멀티 에이전트 — AWS Lambda (Docker)"
+requires-python = ">=3.12"
+dependencies = [
+    "crowdstrike-falconpy>=1.4.0",
+    "pydantic>=2.0",
+    "httpx>=0.27",
+    "boto3>=1.34",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "respx>=0.21",
+    "boto3-stubs[secretsmanager]",
+]
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

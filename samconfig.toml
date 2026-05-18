@@ -1,0 +1,22 @@
+version = 0.1
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "cmdb-collector"
+region = "ap-northeast-2"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+image_repositories = [
+  "CrowdStrikeCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-crowdstrike-collector",
+  "AwsEc2CollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-aws-ec2-collector",
+  "RagEmbedderFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-rag-embedder",
+  "KevCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-kev-collector",
+  "EpssCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-epss-collector",
+  "NvdCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-nvd-collector",
+  "CrowdStrikeAlertsCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-cs-alerts-collector",
+]
+
+[default.build]
+[default.build.parameters]
+use_container = true
