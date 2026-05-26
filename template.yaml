@@ -54,6 +54,10 @@ Parameters:
     Type: String
     Default: "cron(0 19 * * ? *)"
     Description: CrowdStrike Apps (Discover) 수집 스케줄 (UTC 19:00 = KST 04:00, 일 1회)
+  SbomBucketName:
+    Type: String
+    Default: gsretail-sbom
+    Description: Ansible SBOM JSON 업로드 대상 S3 버킷 이름 (자산 → S3 → Lambda)
 
 Resources:
   CrowdStrikeCollectorFunction:
@@ -303,6 +307,62 @@ Resources:
       DockerContext: .
       DockerTag: latest
 
+  SbomIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-sbom-ingest-${Environment}"
+      Description: Ansible SBOM JSON (S3 PutObject) 적재 → tb_asset_software + asset 매칭
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - !Sub "arn:aws:s3:::${SbomBucketName}/*"
+      Events:
+        SbomUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref SbomBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .json
+    Metadata:
+      Dockerfile: src/agents/sbom_ingest/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  SbomBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref SbomBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldSboms
+            Status: Enabled
+            ExpirationInDays: 90       # 90일 후 삭제 (DB에 들어간 후 보관 불필요)
+            NoncurrentVersionExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
 Outputs:
   CrowdStrikeCollectorFunctionArn:
     Description: CrowdStrike Collector Lambda ARN
@@ -328,3 +388,12 @@ Outputs:
   CrowdStrikeAppsCollectorFunctionName:
     Description: CrowdStrike Apps Collector Lambda 함수명
     Value: !Ref CrowdStrikeAppsCollectorFunction
+  SbomIngestFunctionArn:
+    Description: SBOM Ingest Lambda ARN
+    Value: !GetAtt SbomIngestFunction.Arn
+  SbomIngestFunctionName:
+    Description: SBOM Ingest Lambda 함수명
+    Value: !Ref SbomIngestFunction
+  SbomBucketArn:
+    Description: SBOM 업로드 S3 버킷 ARN (Ansible playbook 업로드 대상)
+    Value: !GetAtt SbomBucket.Arn

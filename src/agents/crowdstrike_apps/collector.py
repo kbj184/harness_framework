@@ -87,23 +87,28 @@ def fetch_app_details(base_url: str, token: str, app_ids: list[str]) -> list[dic
 
 UPSERT_SQL = """
 INSERT INTO tb_asset_software (
-    cs_app_id, cs_agent_id, asset_id_hash,
-    name, vendor, version, name_vendor, name_vendor_version,
-    software_type, category, versioning_scheme,
+    asset_id_hash, source, ecosystem,
+    name, vendor, version, release, epoch, arch,
+    purl, name_vendor, name_vendor_version, cpe_uri,
+    software_type, category, versioning_scheme, distribution, source_rpm,
     installation_timestamp, last_used_user_name, last_used_user_sid,
     last_used_file_name, last_used_file_hash, last_used_timestamp, first_seen_timestamp,
-    is_suspicious, is_normalized, cpe_uri,
-    cid, host_hostname, raw_data, fetched_at
+    is_suspicious, is_normalized,
+    cs_app_id, cs_agent_id, cid,
+    host_hostname, sbom_doc_id, raw_data, collected_at, fetched_at
 ) VALUES (
-    %(cs_app_id)s, %(cs_agent_id)s, %(asset_id_hash)s,
-    %(name)s, %(vendor)s, %(version)s, %(name_vendor)s, %(name_vendor_version)s,
-    %(software_type)s, %(category)s, %(versioning_scheme)s,
+    %(asset_id_hash)s, %(source)s, %(ecosystem)s,
+    %(name)s, %(vendor)s, %(version)s, %(release)s, %(epoch)s, %(arch)s,
+    %(purl)s, %(name_vendor)s, %(name_vendor_version)s, %(cpe_uri)s,
+    %(software_type)s, %(category)s, %(versioning_scheme)s, %(distribution)s, %(source_rpm)s,
     %(installation_timestamp)s, %(last_used_user_name)s, %(last_used_user_sid)s,
     %(last_used_file_name)s, %(last_used_file_hash)s, %(last_used_timestamp)s, %(first_seen_timestamp)s,
-    %(is_suspicious)s, %(is_normalized)s, %(cpe_uri)s,
-    %(cid)s, %(host_hostname)s, %(raw_data)s::jsonb, LOCALTIMESTAMP
+    %(is_suspicious)s, %(is_normalized)s,
+    %(cs_app_id)s, %(cs_agent_id)s, %(cid)s,
+    %(host_hostname)s, %(sbom_doc_id)s, %(raw_data)s::jsonb, %(collected_at)s, LOCALTIMESTAMP
 )
-ON CONFLICT (cs_app_id) DO UPDATE SET
+ON CONFLICT (cs_app_id) WHERE source = 'CROWDSTRIKE' AND cs_app_id IS NOT NULL
+DO UPDATE SET
     version              = EXCLUDED.version,
     name_vendor_version  = EXCLUDED.name_vendor_version,
     last_used_user_name  = EXCLUDED.last_used_user_name,
