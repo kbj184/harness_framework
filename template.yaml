@@ -50,6 +50,10 @@ Parameters:
     Type: String
     Default: "rate(15 minutes)"
     Description: CrowdStrike Alerts 수집 스케줄 (실시간 위협)
+  CsAppsScheduleExpression:
+    Type: String
+    Default: "cron(0 19 * * ? *)"
+    Description: CrowdStrike Apps (Discover) 수집 스케줄 (UTC 19:00 = KST 04:00, 일 1회)
 
 Resources:
   CrowdStrikeCollectorFunction:
@@ -268,6 +272,37 @@ Resources:
       DockerContext: .
       DockerTag: latest
 
+  CrowdStrikeAppsCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-cs-apps-collector-${Environment}"
+      Description: CrowdStrike Falcon Discover Applications 수집 → tb_asset_software + asset 매칭
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CROWDSTRIKE_SECRET_NAME: !Ref CrowdStrikeSecretName
+          DB_SECRET_NAME: !Ref DbSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${CrowdStrikeSecretName}-*"
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref CsAppsScheduleExpression
+            Description: CrowdStrike Apps (Discover) 일 1회 수집
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/crowdstrike_apps/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
 Outputs:
   CrowdStrikeCollectorFunctionArn:
     Description: CrowdStrike Collector Lambda ARN
@@ -287,3 +322,9 @@ Outputs:
   RagEmbedderFunctionName:
     Description: RAG Embedder Lambda 함수명
     Value: !Ref RagEmbedderFunction
+  CrowdStrikeAppsCollectorFunctionArn:
+    Description: CrowdStrike Apps Collector Lambda ARN
+    Value: !GetAtt CrowdStrikeAppsCollectorFunction.Arn
+  CrowdStrikeAppsCollectorFunctionName:
+    Description: CrowdStrike Apps Collector Lambda 함수명
+    Value: !Ref CrowdStrikeAppsCollectorFunction
