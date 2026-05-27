@@ -58,6 +58,10 @@ Parameters:
     Type: String
     Default: gsretail-sbom
     Description: Ansible SBOM JSON 업로드 대상 S3 버킷 이름 (자산 → S3 → Lambda)
+  AssetEnrichBucketName:
+    Type: String
+    Default: gsretail-asset-enrich
+    Description: ECS Ansible 보강 결과 JSON 업로드 대상 S3 버킷 (4 카테고리)
 
 Resources:
   CrowdStrikeCollectorFunction:
@@ -363,6 +367,41 @@ Resources:
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
 
+  # ──────────────────────────────────────────────────────────────────────
+  # asset_enrich — P1
+  # ECS Ansible Container 가 카테고리별 JSON 결과를 업로드하는 S3 버킷.
+  # Key 컨벤션: s3://gsretail-asset-enrich/{CATEGORY}/{hostname}/{date}.json
+  # Lifecycle: 30일 후 INTELLIGENT_TIERING, 90일 후 GLACIER, 365일 후 삭제.
+  # Lambda(AssetEnrichFunction)·ECS Task 는 P4 이후 단계에서 추가.
+  # 참조: src/agents/asset_enrich/README.md
+  # ──────────────────────────────────────────────────────────────────────
+  AssetEnrichBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref AssetEnrichBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TieringAndExpiry
+            Status: Enabled
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 30
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+            ExpirationInDays: 365
+            NoncurrentVersionExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
 Outputs:
   CrowdStrikeCollectorFunctionArn:
     Description: CrowdStrike Collector Lambda ARN
@@ -397,3 +436,9 @@ Outputs:
   SbomBucketArn:
     Description: SBOM 업로드 S3 버킷 ARN (Ansible playbook 업로드 대상)
     Value: !GetAtt SbomBucket.Arn
+  AssetEnrichBucketArn:
+    Description: ECS Ansible 보강 결과 업로드 S3 버킷 ARN (4 카테고리)
+    Value: !GetAtt AssetEnrichBucket.Arn
+  AssetEnrichBucketName:
+    Description: ECS Ansible 보강 결과 S3 버킷 이름
+    Value: !Ref AssetEnrichBucket
