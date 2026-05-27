@@ -49,19 +49,20 @@ CrowdStrike Falcon Agent는 **클라우드 서버(EC2)만 대상**. 다음 자�
 │                                                                       │
 │  4) ansible-playbook /playbooks/${CATEGORY}.yml --forks 100          │
 │                                                                       │
-│  5) 결과 JSON 정규화 → S3 PutObject                                  │
-│     s3://gsretail-asset-enrich/${CATEGORY}/{hostname}/{date}.json    │
+│  5) 호스트별 JSON → 카테고리 1 JSONL.gz 묶음 → S3 PutObject          │
+│     s3://gsretail-asset-enrich/${CATEGORY}[/${REGION}]/{date}.jsonl.gz│
+│     (카테고리당 1 파일, STORE_PC만 지역당 1 → 총 7 파일/주)           │
 └──────────────┬──────────────────────────────────────────────────────┘
-               │ S3 PutObject 이벤트
+               │ S3 PutObject 이벤트 (.jsonl.gz suffix 필터)
                ↓
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Lambda asset_enrich_agent (Python · S3 트리거)                       │
 │                                                                       │
-│  1) S3 key 경로 → 카테고리 추출                                       │
-│  2) JSON 파싱                                                         │
+│  1) S3 key prefix → 카테고리 추출 (IDC_NW / ONPREM_UNIX / STORE_*)    │
+│  2) gzip stream 해제 → 한 줄씩 JSON 파싱 (메모리 안전)                │
 │  3) 카테고리별 매퍼 분기                                              │
 │  4) tb_asset_master UPDATE + tb_asset_software UPSERT (NEVRA/purl)   │
-│  5) raw_json·collected_at 보존                                       │
+│  5) 부분 실패 호스트는 별도 quarantine S3 키로 보존                   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -241,11 +242,46 @@ ansible-playbook \
     --forks "${ANSIBLE_FORKS:-100}" \
     --extra-vars "output_dir=/tmp/results category=${CATEGORY}"
 
-# 3. S3 업로드
+# 3. S3 업로드 — 호스트별 JSON 을 카테고리 단일 JSONL 로 묶어서 PutObject
 python3 /opt/enrich/scripts/upload_to_s3.py \
     --category "$CATEGORY" \
     --results /tmp/results \
-    --bucket "$S3_BUCKET"
+    --bucket "$S3_BUCKET" \
+    ${REGION:+--region "$REGION"}
+```
+
+`upload_to_s3.py` 동작:
+```python
+# /tmp/results/*.json (호스트별) → JSONL 1 파일로 묶어 S3 업로드.
+# 결과 파일 수: 카테고리당 1 (STORE_PC는 지역당 1 → 총 4).
+import argparse, json, gzip, boto3, glob, datetime, io
+
+ap = argparse.ArgumentParser()
+ap.add_argument('--category', required=True)
+ap.add_argument('--results',  required=True)
+ap.add_argument('--bucket',   required=True)
+ap.add_argument('--region',   default=None)   # STORE_PC 한정
+args = ap.parse_args()
+
+date    = datetime.date.today().isoformat()
+key_pfx = args.category + (f'/{args.region}' if args.region else '')
+key     = f'{key_pfx}/{date}.jsonl.gz'
+
+# 호스트별 JSON → 한 줄 JSONL 로 concat + gzip 압축
+buf = io.BytesIO()
+with gzip.GzipFile(fileobj=buf, mode='wb') as gz:
+    for path in sorted(glob.glob(f'{args.results}/*.json')):
+        with open(path) as f:
+            data = json.load(f)
+        gz.write((json.dumps(data, ensure_ascii=False) + '\n').encode())
+
+boto3.client('s3').put_object(
+    Bucket=args.bucket,
+    Key=key,
+    Body=buf.getvalue(),
+    ContentEncoding='gzip',
+    ContentType='application/x-ndjson',
+)
 ```
 
 ### 5.3 ECS Task Definition
@@ -268,6 +304,181 @@ ContainerDefinitions:
     Secrets:
       - {Name: DB_PASSWORD, ValueFrom: !Ref DbSecretArn}
 ```
+
+### 5.4 build_inventory.py — CMDB 조회 + Static YAML 생성
+
+ECS Task 시작 시 1회 실행. `tb_asset_master`에서 카테고리(+지역)별 자산을 조회해 `/tmp/inventory.yml` 작성.
+
+**조회 쿼리**:
+```sql
+SELECT
+    asset_id_hash,
+    hostname,
+    ip_addr,
+    ansible_user,
+    ansible_connection,         -- ssh / winrm / network_cli
+    ansible_network_os,         -- ios / nxos / panos / fortios / ...
+    credentials_secret_arn      -- 6 그룹 중 하나
+FROM tb_asset_master
+WHERE category_cd = %(category)s
+  AND lifecycle_state = 'ACTIVE'
+  AND (%(region)s IS NULL OR region_cd = %(region)s)
+ORDER BY ansible_network_os, hostname;
+```
+
+**핵심 동작**:
+```python
+# scripts/build_inventory.py
+import psycopg2, yaml, boto3, os, json, stat
+from collections import defaultdict
+
+CATEGORY = os.environ['CATEGORY']
+REGION   = os.environ.get('REGION')
+
+# 1) CMDB 조회
+with psycopg2.connect(os.environ['DB_URL']) as conn:
+    cur = conn.cursor()
+    cur.execute(SELECT_SQL, {'category': CATEGORY, 'region': REGION})
+    assets = cur.fetchall()
+
+# 2) Unique secret_arn 만 Secrets Manager 호출 (자산별 X, 그룹 6개만)
+sm = boto3.client('secretsmanager')
+unique_arns = {a.credentials_secret_arn for a in assets}
+group_keys = {}
+os.makedirs('/tmp/keys', exist_ok=True)
+for arn in unique_arns:
+    secret = json.loads(sm.get_secret_value(SecretId=arn)['SecretString'])
+    group_name = secret['group_name']   # 예: 'aix' / 'linux' / 'cisco-ios'
+    key_path = f'/tmp/keys/{group_name}.pem'
+    with open(key_path, 'w') as f:
+        f.write(secret['ssh_private_key'])
+    os.chmod(key_path, stat.S_IRUSR)    # 600 권한
+    group_keys[arn] = (group_name, key_path, secret)
+
+# 3) Inventory YAML 작성 (호스트 그룹 = ansible_network_os 또는 OS family)
+inventory = {'all': {'children': {}, 'vars': {}}}
+groups = defaultdict(dict)              # group_name → {hostname: host_vars}
+
+for a in assets:
+    group_name, key_path, secret = group_keys[a.credentials_secret_arn]
+    host_vars = {
+        'ansible_host':       a.ip_addr,
+        'ansible_user':       a.ansible_user,
+        'ansible_connection': a.ansible_connection,
+        'asset_id_hash':      a.asset_id_hash,
+    }
+    if a.ansible_connection == 'ssh':
+        host_vars['ansible_ssh_private_key_file'] = key_path
+    elif a.ansible_connection == 'winrm':
+        host_vars['ansible_password']         = secret['ad_password']
+        host_vars['ansible_winrm_transport']  = 'kerberos'
+    elif a.ansible_connection == 'network_cli':
+        host_vars['ansible_network_os']       = a.ansible_network_os
+        host_vars['ansible_ssh_private_key_file'] = key_path
+
+    groups[group_name][a.hostname] = host_vars
+
+inventory['all']['children'] = {g: {'hosts': h} for g, h in groups.items()}
+with open('/tmp/inventory.yml', 'w') as f:
+    yaml.dump(inventory, f, sort_keys=False)
+```
+
+**생성 예시 (ONPREM_UNIX)**:
+```yaml
+all:
+  children:
+    aix:
+      hosts:
+        aix-erp-01:
+          ansible_host: 10.10.1.5
+          ansible_user: svc-cmdb
+          ansible_connection: ssh
+          ansible_ssh_private_key_file: /tmp/keys/aix.pem
+          asset_id_hash: "abc123..."
+    linux:
+      hosts:
+        rhel-app-01:
+          ansible_host: 10.10.2.10
+          ansible_user: svc-cmdb
+          ansible_connection: ssh
+          ansible_ssh_private_key_file: /tmp/keys/linux.pem
+          asset_id_hash: "def456..."
+```
+
+**Task 종료 시 정리** — `run.sh`에 trap 추가:
+```bash
+cleanup() {
+    rm -rf /tmp/keys /tmp/inventory.yml /tmp/results
+}
+trap cleanup EXIT
+```
+
+### 5.5 자격증명 그룹화 — Secrets Manager 6 항목
+
+**핵심 결정**: 자산별 Secret(5만+ 개)이 아니라 **OS·벤더 6 그룹**으로 통합. 자산은 `credentials_secret_arn` 컬럼으로 자기 그룹의 Secret을 가리킴.
+
+| Secret ARN 이름 | group_name | 적용 카테고리 | 자격증명 형식 |
+|---|---|---|---|
+| `cmdb/ansible/aix` | `aix` | ONPREM_UNIX (AIX) | SSH private key + sudo password |
+| `cmdb/ansible/linux` | `linux` | ONPREM_UNIX (RHEL/Ubuntu) | SSH private key |
+| `cmdb/ansible/cisco-ios` | `cisco-ios` | IDC_NW + STORE_NW (Cisco) | SSH private key + enable password |
+| `cmdb/ansible/paloalto` | `paloalto` | IDC_NW (Palo Alto) | API key |
+| `cmdb/ansible/fortinet` | `fortinet` | IDC_NW (Fortinet) | API token |
+| `cmdb/ansible/store-pc-ad` | `store-pc-ad` | STORE_PC (Windows) | AD 단일 도메인 서비스 계정 (`GSRETAIL\svc-cmdb`) |
+
+**Secret 내용 표준 형식 (JSON)**:
+```json
+{
+  "group_name": "aix",
+  "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...",
+  "ssh_public_key": "ssh-ed25519 AAAA...",
+  "sudo_password": "...",
+  "enable_password": null,
+  "ad_username": null,
+  "ad_password": null,
+  "rotated_at": "2026-05-27T00:00:00Z"
+}
+```
+
+**자산 → Secret 매핑 (P1 적용 시)**:
+```sql
+-- AIX 서버 그룹
+UPDATE tb_asset_master
+SET ansible_connection = 'ssh',
+    ansible_user       = 'svc-cmdb',
+    credentials_secret_arn = 'arn:aws:secretsmanager:ap-northeast-2:...:secret:cmdb/ansible/aix-XXXX'
+WHERE category_cd = 'ONPREM_UNIX' AND os_name LIKE 'AIX%';
+
+-- Linux 서버 그룹
+UPDATE tb_asset_master
+SET ansible_connection = 'ssh',
+    ansible_user       = 'svc-cmdb',
+    credentials_secret_arn = 'arn:aws:secretsmanager:ap-northeast-2:...:secret:cmdb/ansible/linux-XXXX'
+WHERE category_cd = 'ONPREM_UNIX' AND os_name ~* '(rhel|ubuntu|centos|rocky)';
+
+-- 점포 PC (5만대) — 모두 단일 AD 계정
+UPDATE tb_asset_master
+SET ansible_connection = 'winrm',
+    ansible_user       = 'GSRETAIL\svc-cmdb',
+    credentials_secret_arn = 'arn:aws:secretsmanager:ap-northeast-2:...:secret:cmdb/ansible/store-pc-ad-XXXX'
+WHERE category_cd = 'STORE_PC';
+```
+
+**IAM 권한** — ECS Task Role:
+```yaml
+Statement:
+  - Effect: Allow
+    Action: secretsmanager:GetSecretValue
+    Resource:
+      - arn:aws:secretsmanager:ap-northeast-2:*:secret:cmdb/ansible/*
+```
+
+**키 회전**: 6 개만 회전하면 됨. Secrets Manager 자동 회전 30~90일 설정.
+
+**보안 — 메모리 안전**:
+- 키는 ECS 컨테이너 `/tmp/keys/`에만 존재, 권한 600
+- Task 종료 시 컨테이너와 함께 소멸 (Fargate는 격리된 미니 VM)
+- S3·DB에 절대 평문 저장 X
 
 ---
 
@@ -417,12 +628,12 @@ collect_cmdb/src/agents/asset_enrich/
   └── README.md
 ```
 
-### 7.2 handler.py 골격
+### 7.2 handler.py 골격 — JSONL stream 처리
+
+S3 객체 1개 = 카테고리 1회 수집 결과 전체 (호스트 수백~수만). **stream 처리**로 메모리 안전.
 
 ```python
-import json
-import os
-import boto3
+import json, gzip, os, boto3
 from collect_cmdb.src.agents.asset_enrich.mappers import (
     onprem_unix, idc_nw, store_nw, store_pc
 )
@@ -439,24 +650,53 @@ MAPPERS = {
 def handler(event, context):
     for record in event['Records']:
         bucket = record['s3']['bucket']['name']
-        key = record['s3']['object']['key']
-        # key 예: ONPREM_UNIX/aix-erp-01/2026-05-27.json
+        key    = record['s3']['object']['key']
+        # key 예:
+        #   ONPREM_UNIX/2026-05-27.jsonl.gz
+        #   STORE_PC/KR1/2026-05-27.jsonl.gz
 
-        parts = key.split('/', 2)
-        if len(parts) < 3:
-            continue
-        category, hostname, _ = parts
-
-        obj = s3.get_object(Bucket=bucket, Key=key)
-        data = json.loads(obj['Body'].read())
-
-        mapper = MAPPERS.get(category)
+        parts    = key.split('/')
+        category = parts[0]
+        mapper   = MAPPERS.get(category)
         if not mapper:
             print(f'no mapper for category={category}')
             continue
 
-        mapper(data)
+        # S3 스트림 → gzip 압축 해제 → 한 줄씩 JSON 파싱 → mapper
+        body = s3.get_object(Bucket=bucket, Key=key)['Body']
+        successes = failures = 0
+        failed_hosts = []
+        with gzip.GzipFile(fileobj=body) as gz:
+            for line in gz:
+                if not line.strip():
+                    continue
+                try:
+                    mapper(json.loads(line))
+                    successes += 1
+                except Exception as e:
+                    failures += 1
+                    try:
+                        host = json.loads(line).get('asset_id_hash', '?')
+                    except Exception:
+                        host = '?'
+                    failed_hosts.append({'asset_id_hash': host, 'error': str(e)})
+
+        # 부분 실패 → 별도 quarantine 키로 보존
+        if failed_hosts:
+            qkey = key.replace('.jsonl.gz', '.failures.json')
+            s3.put_object(
+                Bucket=os.environ['QUARANTINE_BUCKET'],
+                Key=qkey,
+                Body=json.dumps(failed_hosts, ensure_ascii=False).encode(),
+            )
+
+        print(f'enriched: success={successes} fail={failures} key={key}')
 ```
+
+**Lambda 사양**:
+- Memory: 1 GB (5만 호스트도 stream 처리라 충분)
+- Timeout: 15분 (STORE_PC 지역 1개 5만 호스트 ≈ 10초 처리, 안전 마진)
+- 1000행 단위 배치 INSERT 권장 (매퍼 내부 구현)
 
 ### 7.3 매퍼 예시 — onprem_unix.py
 
@@ -503,14 +743,27 @@ def enrich(data: dict) -> None:
 
 ## 8. S3 + IAM 구조
 
-### 8.1 S3 버킷
+### 8.1 S3 버킷 — 카테고리별 단일 JSONL.gz
+
+**파일 단위**: 카테고리당 1 파일 (STORE_PC만 지역당 1 = 총 4 파일). 호스트별 줄로 묶음.
 
 ```
-gsretail-asset-enrich
-  ├── IDC_NW/
-  ├── ONPREM_UNIX/
-  ├── STORE_NW/
+gsretail-asset-enrich/
+  ├── IDC_NW/      2026-05-27.jsonl.gz       (~수백 호스트 1 파일)
+  ├── ONPREM_UNIX/ 2026-05-27.jsonl.gz       (~수백 호스트 1 파일)
+  ├── STORE_NW/    2026-05-27.jsonl.gz       (~수천 호스트 1 파일)
   └── STORE_PC/
+        ├── KR1/   2026-05-27.jsonl.gz       (~1.25만 호스트)
+        ├── KR2/   2026-05-27.jsonl.gz       (~1.25만 호스트)
+        ├── KR3/   2026-05-27.jsonl.gz       (~1.25만 호스트)
+        └── KR4/   2026-05-27.jsonl.gz       (~1.25만 호스트)
+```
+
+**파일 수**: 주당 7개 (실패 quarantine 제외). Lambda 호출도 주당 7회.
+
+**JSONL 한 줄 예시**:
+```json
+{"asset_id_hash":"abc123","category":"ONPREM_UNIX","facts":{"os":"RHEL 9.4","kernel":"5.14.0","arch":"x86_64","memory_mb":16384,"cpu_cores":8,"ip_addrs":["10.10.1.5"]},"packages":{"openssl-libs":[{"name":"openssl-libs","version":"3.0.7","release":"27.el9_4","arch":"x86_64"}]}}
 ```
 
 **Lifecycle Policy**:
@@ -518,7 +771,7 @@ gsretail-asset-enrich
 - 90일 후 GLACIER
 - 365일 후 DELETE
 
-### 8.2 EventBridge S3 알림
+### 8.2 EventBridge S3 알림 — `.jsonl.gz` suffix 필터
 
 ```yaml
 NotificationConfiguration:
@@ -529,8 +782,10 @@ NotificationConfiguration:
         Key:
           FilterRules:
             - Name: suffix
-              Value: .json
+              Value: .jsonl.gz       # 매퍼가 처리할 카테고리 결과만
 ```
+
+ECS PutObject → 1~3초 내 Lambda invoke. eventual consistency 누락은 매우 드물지만, P4 구현 시 `quarantine` 큐 + 운영자 수동 재실행 절차로 보완.
 
 ### 8.3 IAM 역할
 
@@ -578,9 +833,9 @@ NotificationConfiguration:
 - ECS Fargate: $0.04/vCPU/hour, $0.004/GB/hour
   - 일일 평균 1시간 실행 × 5 카테고리 = ~$1/일 = **$30/월**
 - 점포 PC 주 1회 4지역 병렬 (2시간 × 4 Task) = ~$2/주 = **$10/월**
-- S3 저장: 100KB × 5만 파일 × 30일 = 150GB = **$3/월**
-- Lambda 호출: ~5만/주 = ~20만/월 × $0.0000002 = **$0.04/월** (무시)
-- **총 ~$50/월**
+- S3 저장: 카테고리당 1 JSONL.gz (gzip 압축 후 ~5MB) × 7 파일/주 × 12주 보관 = ~0.5GB = **$0.01/월** (무시)
+- Lambda 호출: 7/주 = ~30/월 × $0.0000002 = **무시**
+- **총 ~$40/월** (당초 ~$50 → 파일 수 단순화로 절감)
 
 ### 10.3 보안
 - Secrets Manager에 SSH 키·AD 계정 보관 (KMS 암호화)
