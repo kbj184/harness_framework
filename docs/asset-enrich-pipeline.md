@@ -1,22 +1,32 @@
-# 자산 보강 파이프라인 구현 계획 (ECS Ansible × EventBridge × S3 × Lambda)
+# 자산 보강 파이프라인 구현 계획 (ECS Ansible + ECS EPP × EventBridge × S3 × Lambda)
 
-**문서 버전**: v1.0 · 2026-05-27
-**범위**: CrowdStrike Agent 미커버 자산(온프레미스/점포)의 자동 보강 파이프라인
-**구현 기간**: 10일 (P1~P9)
+**문서 버전**: v2.0 · 2026-05-28 (수집 채널 재배치 반영)
+**범위**: CrowdStrike Agent 미커버 자산의 자동 보강 파이프라인
+**구현 기간**: 8일 (P1~P8)
 
 ---
 
 ## 1. 배경 및 목표
 
-CrowdStrike Falcon Agent는 **클라우드 서버(EC2)만 대상**. 다음 자산군은 자체 수집 채널 필요:
+CrowdStrike Falcon Agent는 **클라우드 서버(EC2)만 대상**. 다음 자산군은 자체 수집 채널이 필요하며, 수집 채널을 **2 트랙으로 재배치** (2026-05-28 결정):
 
-| 자산군 | 규모(추정) | 현 상태 |
+### Ansible 트랙 (ECS Ansible Container — SSH/CLI 직접 접속)
+
+| 자산군 | 규모(추정) | category_cd |
 |---|---|---|
-| 온프레미스 Unix (AIX/Solaris/HP-UX/Linux) | ~수백대 | 수집 채널 없음 |
-| IDC 네트워크 장비 (Cisco/F5/Palo Alto/Fortinet) | ~수백대 | 수집 채널 없음 |
-| 점포 네트워크 (라우터/스위치) | ~수천대 | 수집 채널 없음 |
-| 점포 PC (Windows) | ~5만대 | 수집 채널 없음 |
-| 본사 PC | ~수천대 | (별도 검토) |
+| 온프레미스 Unix (AIX/Solaris/HP-UX/Linux) | ~수백대 | `ONPREM_UNIX` |
+| IDC 네트워크 장비 (Cisco/F5/Palo Alto/Fortinet) | ~수백대 | `IDC_NW` |
+| 점포 네트워크 (라우터/스위치) | ~수천대 | `STORE_NW` |
+
+### EPP 트랙 (ECS Fargate + asyncio — 안랩 EPP API)
+
+| 자산군 | 규모(추정) | category_cd |
+|---|---|---|
+| 점포 PC (Windows) | ~5만대 | `EPP_STORE_OA` |
+| 본사·사무실 PC | ~1만대 | `EPP_OFFICE_OA` |
+| 기타 서버 (Ansible 미적용) | ~5천대 | `EPP_ETC_SERVER` |
+
+> **변경 이유 (2026-05-28):** 점포 PC를 Ansible WinRM으로 수집하던 계획은 본사 → 점포 라우팅·AD 인증·시간 부담이 큼. 점포 PC·본사 PC·기타 서버는 모두 안랩 EPP Agent가 깔려있으므로 EPP API로 통합 수집이 효율적. EPP 호출 패턴(목록 1회 + 자산별 SBOM 6.5만 회)은 Lambda 15분 한도를 초과하므로 ECS Fargate + asyncio로 처리.
 
 **목표**: 위 자산군에 대해 자동 수집 파이프라인 구축 → tb_asset_master/tb_asset_software 보강
 
@@ -24,41 +34,53 @@ CrowdStrike Falcon Agent는 **클라우드 서버(EC2)만 대상**. 다음 자�
 
 ## 2. 아키텍처
 
+**2 트랙 + 공통 Lambda 매퍼 + 보안정보 별도 트랙**
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  EventBridge (cron rules)                                            │
-│    rule_idc_nw      cron(0 19 * * ? *)   일 1회 KST 04:00            │
-│    rule_onprem_unix cron(0 19 * * ? *)   일 1회 KST 04:00            │
-│    rule_store_nw    cron(0 19 * * ? *)   일 1회 KST 04:00            │
-│    rule_store_pc_kr1 cron(0 17 ? * SUN *) 주 1회 KST 02:00 — 수도권   │
-│    rule_store_pc_kr2 cron(0 17 ? * SUN *) 주 1회 KST 02:00 — 영남     │
-│    rule_store_pc_kr3 cron(0 17 ? * SUN *) 주 1회 KST 02:00 — 호남     │
-│    rule_store_pc_kr4 cron(0 17 ? * SUN *) 주 1회 KST 02:00 — 충청     │
+│    rule_idc_nw      cron(0 19 * * ? *)   일 1회 KST 04:00 (Ansible)  │
+│    rule_onprem_unix cron(0 19 * * ? *)   일 1회 KST 04:00 (Ansible)  │
+│    rule_store_nw    cron(0 19 * * ? *)   일 1회 KST 04:00 (Ansible)  │
+│    rule_epp_assets  cron(0 18 * * ? *)   일 1회 KST 03:00 (EPP)      │
 └──────────────┬──────────────────────────────────────────────────────┘
-               │ ECS RunTask + env CATEGORY=xxx [+ REGION=xxx]
+               │ ECS RunTask
                ↓
 ┌─────────────────────────────────────────────────────────────────────┐
-│  ECS Fargate Task — Ansible Container (단일 이미지)                  │
+│  Track A — ECS Fargate · Ansible Container (env CATEGORY=xxx)        │
 │                                                                       │
 │  1) CMDB 조회 — tb_asset_master WHERE category_cd = ${CATEGORY}      │
-│     [AND region_cd = ${REGION}] (STORE_PC 한정)                      │
-│                                                                       │
 │  2) Ansible Dynamic Inventory 생성 (/tmp/inventory.yml)              │
-│                                                                       │
-│  3) Secrets Manager → SSH 키 / AD 자격증명 로드                       │
-│                                                                       │
+│  3) Secrets Manager → SSH 키 로드                                     │
 │  4) ansible-playbook /playbooks/${CATEGORY}.yml --forks 100          │
-│                                                                       │
 │  5) 호스트별 JSON → 카테고리 1 JSONL.gz 묶음 → S3 PutObject          │
-│     s3://gsretail-asset-enrich/${CATEGORY}[/${REGION}]/{date}.jsonl.gz│
-│     (카테고리당 1 파일, STORE_PC만 지역당 1 → 총 7 파일/주)           │
+│     s3://gsretail-asset-enrich/${CATEGORY}/{date}.jsonl.gz           │
+│                                                                       │
+│  대상 카테고리: IDC_NW / ONPREM_UNIX / STORE_NW (3 파일/일)          │
+└──────────────┬──────────────────────────────────────────────────────┘
+               │
+               │  ──────── Track B (병렬) ────────
+               │
+┌──────────────┴──────────────────────────────────────────────────────┐
+│  Track B — ECS Fargate · EPP Collector Container (asyncio + httpx)   │
+│                                                                       │
+│  1) Secrets Manager → 안랩 EPP API Token 로드                         │
+│  2) 안랩 EPP 목록 API 1회 호출 → ~65,000 자산 응답                    │
+│  3) 자산별 SBOM API 동시 호출 (asyncio.Semaphore(100))                │
+│     · 처리 시간 ~11~22분                                              │
+│  4) EPP 응답의 자산 분류 필드 → category_cd 결정                      │
+│     EPP_STORE_OA / EPP_OFFICE_OA / EPP_ETC_SERVER                    │
+│  5) 결과 → JSONL.gz 1 파일 (카테고리 혼합, 줄별 category_cd 명시)    │
+│     s3://gsretail-asset-enrich/EPP/{date}.jsonl.gz                   │
 └──────────────┬──────────────────────────────────────────────────────┘
                │ S3 PutObject 이벤트 (.jsonl.gz suffix 필터)
                ↓
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Lambda asset_enrich_agent (Python · S3 트리거)                       │
+│  Lambda asset_enrich_agent (Python · S3 트리거) — Ansible/EPP 공통    │
 │                                                                       │
-│  1) S3 key prefix → 카테고리 추출 (IDC_NW / ONPREM_UNIX / STORE_*)    │
+│  1) S3 key prefix 또는 JSONL 줄의 category_cd 로 분기                 │
+│     (Ansible: prefix=IDC_NW/ONPREM_UNIX/STORE_NW)                    │
+│     (EPP:     prefix=EPP, 줄별 category_cd=EPP_STORE_OA/...)         │
 │  2) gzip stream 해제 → 한 줄씩 JSON 파싱 (메모리 안전)                │
 │  3) 카테고리별 매퍼 분기                                              │
 │  4) tb_asset_master UPDATE + tb_asset_software UPSERT (NEVRA/purl)   │
@@ -66,14 +88,18 @@ CrowdStrike Falcon Agent는 **클라우드 서버(EC2)만 대상**. 다음 자�
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-별도 트랙 (AhnLab):
+**보안 정보 트랙 (자산 정보 트랙 안정화 후 별도 phase로 진행)**:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Lambda ahnlab_epp_collector (EventBridge cron)                       │
-│    AhnLab V3 Manager API → 점포 PC 보안 상태 → tb_asset_security      │
+│  Lambda ahnlab_epp_security_collector (EventBridge cron, 시간당)      │
+│    안랩 EPP 보안 상태 endpoint → tb_asset_security                    │
+│    (Agent ID, AV 패턴 버전, 정책 그룹, 검사 결과, 격리 상태)          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+**ECS 구조**:
+- Ansible Task와 EPP Task는 **같은 ECS Cluster·VPC·IAM 패턴 공유**, **컨테이너 이미지는 별개** (Ansible은 SSH·Ansible 의존성 필요, EPP는 httpx만 필요)
 
 ---
 
@@ -112,28 +138,42 @@ CrowdStrike Falcon Agent는 **클라우드 서버(EC2)만 대상**. 다음 자�
 | 빈도 | 일 1회 (KST 04:00) |
 | 예상 자산 수 | ~수천대 |
 
-### 3.4 점포 PC (`category_cd = STORE_PC`)
+### 3.4 EPP (안랩) 자산 정보 트랙 — `category_cd = EPP_*`
+
+> **결정 (2026-05-28):** 점포 PC를 Ansible WinRM으로 수집하는 계획(이전 `STORE_PC`)은 본사 → 점포 라우팅·AD 인증·시간 부담으로 폐기. **안랩 EPP API**로 통합 수집. EPP 응답에 자산 분류 필드가 있어 카테고리 3종으로 분기.
 
 | 항목 | 값 |
 |---|---|
-| 대상 | Windows 10/11 (점포 단말 + POS) |
-| 프로토콜 | WinRM (`ansible.windows`) |
-| 자격증명 | AD 도메인 계정 (Secrets Manager) |
-| 수집 항목 | hostname, OS 빌드, 설치 SW (Uninstall registry), hotfix, AV 상태, 도메인 가입, BIOS serial |
-| 빈도 | 주 1회 (KST 일요일 02:00) |
-| 분할 실행 | **지역 4개 병렬** (수도권/영남/호남/충청) |
-| 예상 자산 수 | ~5만대 (지역당 ~1.25만) |
+| 대상 | 안랩 Agent 설치된 모든 자산 (~65,000대) — 점포 PC + 본사·사무실 PC + 기타 서버 |
+| 프로토콜 | 안랩 EPP V3 Manager API (`httpx`) |
+| 자격증명 | API Token (Secrets Manager — `cmdb/ansible/ahnlab-epp` 등 별도 ARN) |
+| **수집 채널** | **ECS Fargate Task (asyncio + httpx)** — Lambda 아님 (15분 한도 초과) |
+| 동시성 | `asyncio.Semaphore(100)` (안랩 API rate limit 실측 후 조정) |
+| 수집 항목 | hostname, OS·빌드, 설치 SW, hotfix, BIOS serial, IP/MAC, 자산 분류 필드 (보안 정보는 §3.5 별도 트랙) |
+| 빈도 | 일 1회 (KST 03:00) |
+| 호출 흐름 | 목록 API 1회 (≈65,000 자산 응답) → 자산별 SBOM API 동시 100 호출 → JSONL.gz 묶음 → S3 |
+| 예상 처리 시간 | 11~22분 (동시 100 기준) |
 
-### 3.5 AhnLab EPP/EDR (별도 트랙, `category_cd 무관`)
+EPP 카테고리 3종 — 안랩 API 응답의 자산 분류 필드로 결정:
+
+| `category_cd` | 대상 |
+|---|---|
+| `EPP_STORE_OA` | 점포 PC (Windows) — 약 5만대 |
+| `EPP_OFFICE_OA` | 본사·사무실 PC — 약 1만대 |
+| `EPP_ETC_SERVER` | Ansible 미적용 기타 서버 (Windows·Linux 혼재) — 약 5천대 |
+
+### 3.5 AhnLab EPP/EDR 보안 정보 트랙 — `tb_asset_security` (별도, 추후)
+
+> **본 작업 범위 외** — 자산 정보(§3.4) 트랙 안정화 후 별도 phase로 진행.
 
 | 항목 | 값 |
 |---|---|
-| 대상 | 점포 PC + 본사 PC (AhnLab Agent 설치된 모든 PC) |
-| 프로토콜 | AhnLab V3 Manager API |
-| 자격증명 | API Token (Secrets Manager) |
+| 대상 | 안랩 Agent 설치된 모든 자산 |
+| 프로토콜 | 안랩 EPP V3 Manager API (보안 상태 endpoint) |
+| 수집 채널 | **별도 Lambda** (자산 정보보다 가볍고 시간당 갱신) |
 | 수집 항목 | Agent ID, AV 패턴 버전, 정책 그룹, 최근 검사 결과, 격리 상태 |
 | 빈도 | 시간당 |
-| 적재 | tb_asset_security (별도 테이블) — hostname/MAC으로 tb_asset_master 매칭 |
+| 적재 | `tb_asset_security` (별도 테이블) — asset_id_hash로 tb_asset_master 매칭 |
 
 ---
 
@@ -150,7 +190,7 @@ ALTER TABLE tb_asset_master ADD COLUMN IF NOT EXISTS ansible_network_os  VARCHAR
 ALTER TABLE tb_asset_master ADD COLUMN IF NOT EXISTS credentials_secret_arn VARCHAR(500);
   -- Secrets Manager ARN
 ALTER TABLE tb_asset_master ADD COLUMN IF NOT EXISTS region_cd           VARCHAR(20);
-  -- KR1/KR2/KR3/KR4 (STORE_PC 한정)
+  -- KR1/KR2/KR3/KR4 (지역 분류, 보조)
 ALTER TABLE tb_asset_master ADD COLUMN IF NOT EXISTS ansible_enriched_at TIMESTAMPTZ;
   -- 마지막 보강 시각
 ```
@@ -415,7 +455,7 @@ trap cleanup EXIT
 
 ### 5.5 자격증명 그룹화 — Secrets Manager 6 항목
 
-**핵심 결정**: 자산별 Secret(5만+ 개)이 아니라 **OS·벤더 6 그룹**으로 통합. 자산은 `credentials_secret_arn` 컬럼으로 자기 그룹의 Secret을 가리킴.
+**핵심 결정**: 자산별 Secret이 아니라 **OS·벤더 6 그룹**으로 통합. Ansible 자산은 `credentials_secret_arn` 컬럼으로 자기 그룹의 Secret을 가리킴. EPP는 단일 API Token.
 
 | Secret ARN 이름 | group_name | 적용 카테고리 | 자격증명 형식 |
 |---|---|---|---|
@@ -424,7 +464,9 @@ trap cleanup EXIT
 | `cmdb/ansible/cisco-ios` | `cisco-ios` | IDC_NW + STORE_NW (Cisco) | SSH private key + enable password |
 | `cmdb/ansible/paloalto` | `paloalto` | IDC_NW (Palo Alto) | API key |
 | `cmdb/ansible/fortinet` | `fortinet` | IDC_NW (Fortinet) | API token |
-| `cmdb/ansible/store-pc-ad` | `store-pc-ad` | STORE_PC (Windows) | AD 단일 도메인 서비스 계정 (`GSRETAIL\svc-cmdb`) |
+| `cmdb/ahnlab-epp` | `ahnlab-epp` | EPP_STORE_OA + EPP_OFFICE_OA + EPP_ETC_SERVER | 안랩 EPP API Token (Bearer) |
+
+→ 기존 `store-pc-ad`(AD 도메인 계정) Secret은 폐기. 점포 PC는 안랩 EPP로 흡수되므로 AD 직접 인증 불필요.
 
 **Secret 내용 표준 형식 (JSON)**:
 ```json
@@ -456,21 +498,19 @@ SET ansible_connection = 'ssh',
     credentials_secret_arn = 'arn:aws:secretsmanager:ap-northeast-2:...:secret:cmdb/ansible/linux-XXXX'
 WHERE category_cd = 'ONPREM_UNIX' AND os_name ~* '(rhel|ubuntu|centos|rocky)';
 
--- 점포 PC (5만대) — 모두 단일 AD 계정
-UPDATE tb_asset_master
-SET ansible_connection = 'winrm',
-    ansible_user       = 'GSRETAIL\svc-cmdb',
-    credentials_secret_arn = 'arn:aws:secretsmanager:ap-northeast-2:...:secret:cmdb/ansible/store-pc-ad-XXXX'
-WHERE category_cd = 'STORE_PC';
+-- EPP 자산 (점포 PC / 사무실 PC / 기타 서버 ~65,000대)
+-- Ansible 자격증명 컬럼은 사용 안 함. EPP Task는 cmdb/ahnlab-epp Secret 한 개 직접 로드.
+-- tb_asset_master 매칭은 EPP 응답의 hostname/MAC 으로 (Lambda 매퍼가 처리).
 ```
 
-**IAM 권한** — ECS Task Role:
+**IAM 권한** — ECS Task Role (Ansible Task + EPP Task 공유):
 ```yaml
 Statement:
   - Effect: Allow
     Action: secretsmanager:GetSecretValue
     Resource:
       - arn:aws:secretsmanager:ap-northeast-2:*:secret:cmdb/ansible/*
+      - arn:aws:secretsmanager:ap-northeast-2:*:secret:cmdb/ahnlab-epp-*
 ```
 
 **키 회전**: 6 개만 회전하면 됨. Secrets Manager 자동 회전 30~90일 설정.
@@ -561,52 +601,70 @@ Statement:
 
 IDC_NW와 동일 구조 (Cisco 명령). 단, store-specific 룰 추가.
 
-### 6.4 playbooks/STORE_PC.yml
+### 6.4 EPP 트랙 — playbook 없음, Python asyncio 스크립트
 
-```yaml
-- hosts: all
-  gather_facts: yes
-  connection: winrm
-  tasks:
-    - name: 설치 SW (Uninstall 레지스트리)
-      ansible.windows.win_shell: |
-        Get-ItemProperty `
-          HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*, `
-          HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* `
-        | Where-Object { $_.DisplayName } `
-        | Select-Object DisplayName, DisplayVersion, Publisher `
-        | ConvertTo-Json -Compress
-      register: installed
+EPP 트랙은 Ansible playbook을 쓰지 않고 **별도 ECS 컨테이너 안의 Python asyncio 스크립트**로 동작:
 
-    - name: Hotfix
-      ansible.windows.win_shell: Get-HotFix | ConvertTo-Json -Compress
-      register: hotfix
+```python
+# src/agents/asset_enrich/epp_ecs/scripts/fetch_epp.py
+import asyncio, httpx, json, gzip, boto3, os
+from datetime import date
 
-    - name: BIOS Serial
-      ansible.windows.win_shell: (Get-CimInstance Win32_BIOS).SerialNumber
-      register: serial
+EPP_BASE_URL = os.environ['EPP_BASE_URL']
+EPP_TOKEN    = json.loads(boto3.client('secretsmanager')
+                          .get_secret_value(SecretId=os.environ['EPP_SECRET_ARN'])['SecretString'])['token']
+S3_BUCKET    = os.environ['S3_BUCKET']
 
-    - name: 결과 저장
-      copy:
-        content: >-
-          {{
-            {
-              'asset_id_hash': asset_id_hash,
-              'category': category,
-              'facts': {
-                'hostname': ansible_facts.hostname,
-                'os': ansible_facts.distribution + ' ' + ansible_facts.distribution_version,
-                'os_build': ansible_facts.os_version,
-                'domain': ansible_facts.windows_domain,
-                'serial': serial.stdout | trim,
-              },
-              'software': installed.stdout | from_json,
-              'hotfix': hotfix.stdout | from_json,
-            } | to_nice_json
-          }}
-        dest: "{{ output_dir }}/{{ inventory_hostname }}.json"
-      delegate_to: localhost
+CATEGORY_MAP = {
+    'STORE_PC':   'EPP_STORE_OA',
+    'OFFICE_PC':  'EPP_OFFICE_OA',
+    'SERVER':     'EPP_ETC_SERVER',
+}
+
+async def fetch_sbom(client, sem, asset):
+    async with sem:
+        for attempt in range(2):
+            try:
+                r = await client.get(f"/api/assets/{asset['id']}/sbom", timeout=30)
+                r.raise_for_status()
+                return {
+                    "category_cd": CATEGORY_MAP.get(asset['type'], 'EPP_ETC_SERVER'),
+                    "asset_id":    asset['id'],
+                    "hostname":    asset['hostname'],
+                    "mac":         asset.get('mac'),
+                    "ip":          asset.get('ip'),
+                    "os":          asset.get('os'),
+                    "sbom":        r.json(),
+                }
+            except Exception as e:
+                if attempt == 1:
+                    return {"error": str(e), "asset_id": asset['id']}
+                await asyncio.sleep(60)
+
+async def main():
+    headers = {"Authorization": f"Bearer {EPP_TOKEN}"}
+    async with httpx.AsyncClient(base_url=EPP_BASE_URL, headers=headers, timeout=60) as client:
+        # 1. 목록
+        assets = (await client.get("/api/assets")).json()   # ~65,000
+        # 2. SBOM 동시 호출
+        sem = asyncio.Semaphore(100)
+        results = await asyncio.gather(*[fetch_sbom(client, sem, a) for a in assets])
+        # 3. JSONL.gz 묶음
+        key = f"EPP/{date.today().isoformat()}.jsonl.gz"
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode='wb') as gz:
+            for row in results:
+                gz.write((json.dumps(row, ensure_ascii=False) + '\n').encode())
+        boto3.client('s3').put_object(
+            Bucket=S3_BUCKET, Key=key,
+            Body=buf.getvalue(), ContentEncoding='gzip',
+            ContentType='application/x-ndjson',
+        )
+
+asyncio.run(main())
 ```
+
+→ Ansible playbook과 같은 출력 형식(JSONL.gz)이라 **공통 Lambda 매퍼가 그대로 처리** 가능.
 
 ---
 
@@ -617,14 +675,21 @@ IDC_NW와 동일 구조 (Cisco 명령). 단, store-specific 룰 추가.
 ```
 collect_cmdb/src/agents/asset_enrich/
   ├── __init__.py
-  ├── handler.py            # S3 이벤트 핸들러
+  ├── handler.py            # S3 이벤트 핸들러 (Ansible/EPP 공통)
   ├── mappers/
-  │     ├── onprem_unix.py
-  │     ├── idc_nw.py
-  │     ├── store_nw.py
-  │     └── store_pc.py
+  │     ├── onprem_unix.py        # Ansible 트랙
+  │     ├── idc_nw.py             # Ansible 트랙
+  │     ├── store_nw.py           # Ansible 트랙
+  │     └── epp.py                # EPP 트랙 (EPP_STORE_OA/EPP_OFFICE_OA/EPP_ETC_SERVER 공용)
   ├── models.py             # Pydantic 모델
   ├── ddl.sql               # tb_asset_master ALTER + tb_asset_security CREATE
+  ├── ansible_ecs/          # Ansible Container (P2~P3)
+  │     ├── Dockerfile
+  │     ├── playbooks/
+  │     └── scripts/
+  ├── epp_ecs/              # EPP Container (P5)
+  │     ├── Dockerfile
+  │     └── scripts/fetch_epp.py
   └── README.md
 ```
 
@@ -635,16 +700,17 @@ S3 객체 1개 = 카테고리 1회 수집 결과 전체 (호스트 수백~수만
 ```python
 import json, gzip, os, boto3
 from collect_cmdb.src.agents.asset_enrich.mappers import (
-    onprem_unix, idc_nw, store_nw, store_pc
+    onprem_unix, idc_nw, store_nw, epp,
 )
 
 s3 = boto3.client('s3')
 
-MAPPERS = {
+# Ansible 트랙: S3 prefix 가 category_cd
+PREFIX_MAPPERS = {
     'ONPREM_UNIX': onprem_unix.enrich,
     'IDC_NW':      idc_nw.enrich,
     'STORE_NW':    store_nw.enrich,
-    'STORE_PC':    store_pc.enrich,
+    'EPP':         epp.enrich,        # EPP 트랙: prefix=EPP, 줄별 category_cd 로 다시 분기
 }
 
 def handler(event, context):
@@ -653,19 +719,18 @@ def handler(event, context):
         key    = record['s3']['object']['key']
         # key 예:
         #   ONPREM_UNIX/2026-05-27.jsonl.gz
-        #   STORE_PC/KR1/2026-05-27.jsonl.gz
+        #   EPP/2026-05-27.jsonl.gz
 
-        parts    = key.split('/')
-        category = parts[0]
-        mapper   = MAPPERS.get(category)
+        prefix = key.split('/')[0]
+        mapper = PREFIX_MAPPERS.get(prefix)
         if not mapper:
-            print(f'no mapper for category={category}')
+            print(f'no mapper for prefix={prefix}')
             continue
 
         # S3 스트림 → gzip 압축 해제 → 한 줄씩 JSON 파싱 → mapper
         body = s3.get_object(Bucket=bucket, Key=key)['Body']
         successes = failures = 0
-        failed_hosts = []
+        failed = []
         with gzip.GzipFile(fileobj=body) as gz:
             for line in gz:
                 if not line.strip():
@@ -675,27 +740,24 @@ def handler(event, context):
                     successes += 1
                 except Exception as e:
                     failures += 1
-                    try:
-                        host = json.loads(line).get('asset_id_hash', '?')
-                    except Exception:
-                        host = '?'
-                    failed_hosts.append({'asset_id_hash': host, 'error': str(e)})
+                    failed.append({'line': line[:200].decode(errors='replace'),
+                                   'error': str(e)})
 
         # 부분 실패 → 별도 quarantine 키로 보존
-        if failed_hosts:
+        if failed:
             qkey = key.replace('.jsonl.gz', '.failures.json')
             s3.put_object(
                 Bucket=os.environ['QUARANTINE_BUCKET'],
                 Key=qkey,
-                Body=json.dumps(failed_hosts, ensure_ascii=False).encode(),
+                Body=json.dumps(failed, ensure_ascii=False).encode(),
             )
 
         print(f'enriched: success={successes} fail={failures} key={key}')
 ```
 
 **Lambda 사양**:
-- Memory: 1 GB (5만 호스트도 stream 처리라 충분)
-- Timeout: 15분 (STORE_PC 지역 1개 5만 호스트 ≈ 10초 처리, 안전 마진)
+- Memory: 1 GB (수만 호스트도 stream 처리라 충분)
+- Timeout: 15분 (EPP 트랙 ~65,000 호스트 처리 ≈ 1~2분, 안전 마진)
 - 1000행 단위 배치 INSERT 권장 (매퍼 내부 구현)
 
 ### 7.3 매퍼 예시 — onprem_unix.py
@@ -743,27 +805,30 @@ def enrich(data: dict) -> None:
 
 ## 8. S3 + IAM 구조
 
-### 8.1 S3 버킷 — 카테고리별 단일 JSONL.gz
+### 8.1 S3 버킷 — 트랙별 JSONL.gz
 
-**파일 단위**: 카테고리당 1 파일 (STORE_PC만 지역당 1 = 총 4 파일). 호스트별 줄로 묶음.
+**파일 단위**:
+- Ansible 트랙: 카테고리당 1 파일 (3 카테고리 × 일 1회 = 3 파일/일)
+- EPP 트랙: 카테고리 혼합 1 파일 (전 자산 한 파일, 줄별 category_cd로 분기) (1 파일/일)
 
 ```
 gsretail-asset-enrich/
-  ├── IDC_NW/      2026-05-27.jsonl.gz       (~수백 호스트 1 파일)
-  ├── ONPREM_UNIX/ 2026-05-27.jsonl.gz       (~수백 호스트 1 파일)
-  ├── STORE_NW/    2026-05-27.jsonl.gz       (~수천 호스트 1 파일)
-  └── STORE_PC/
-        ├── KR1/   2026-05-27.jsonl.gz       (~1.25만 호스트)
-        ├── KR2/   2026-05-27.jsonl.gz       (~1.25만 호스트)
-        ├── KR3/   2026-05-27.jsonl.gz       (~1.25만 호스트)
-        └── KR4/   2026-05-27.jsonl.gz       (~1.25만 호스트)
+  ├── IDC_NW/      2026-05-27.jsonl.gz       (~수백 호스트, 일 1회)
+  ├── ONPREM_UNIX/ 2026-05-27.jsonl.gz       (~수백 호스트, 일 1회)
+  ├── STORE_NW/    2026-05-27.jsonl.gz       (~수천 호스트, 일 1회)
+  └── EPP/         2026-05-27.jsonl.gz       (~65,000 호스트, 일 1회)
 ```
 
-**파일 수**: 주당 7개 (실패 quarantine 제외). Lambda 호출도 주당 7회.
+**파일 수**: 일 4개, 주 28개 (실패 quarantine 제외). Lambda 호출도 같음.
 
-**JSONL 한 줄 예시**:
+**JSONL 한 줄 예시 — Ansible (`category` 필드)**:
 ```json
 {"asset_id_hash":"abc123","category":"ONPREM_UNIX","facts":{"os":"RHEL 9.4","kernel":"5.14.0","arch":"x86_64","memory_mb":16384,"cpu_cores":8,"ip_addrs":["10.10.1.5"]},"packages":{"openssl-libs":[{"name":"openssl-libs","version":"3.0.7","release":"27.el9_4","arch":"x86_64"}]}}
+```
+
+**JSONL 한 줄 예시 — EPP (`category_cd` 필드)**:
+```json
+{"category_cd":"EPP_STORE_OA","asset_id":"epp-12345","hostname":"pos-12345","mac":"AA:BB:CC:DD:EE:FF","ip":"10.200.1.5","os":"Windows 11 Pro","sbom":[{"name":"Chrome","version":"125.0.6422.142","publisher":"Google"},{"name":"V3 Internet Security","version":"9.0.x"}]}
 ```
 
 **Lifecycle Policy**:
@@ -804,38 +869,50 @@ ECS PutObject → 1~3초 내 Lambda invoke. eventual consistency 누락은 매�
 
 | Phase | 작업 | 산출물 | 기간 |
 |---|---|---|---|
-| **P1** | DDL 보강 (tb_asset_master + tb_asset_security) + S3 버킷·Lifecycle + Secrets Manager 구조 | DDL.sql, SAM 템플릿 일부 | 0.5일 |
-| **P2** | ECS Task Definition + Dockerfile + `build_inventory.py` + `upload_to_s3.py` | ECR 이미지, Task Def | 1일 |
+| **P1** | DDL 보강 (tb_asset_master + tb_asset_security) + S3 버킷·Lifecycle + Secrets Manager 구조 | DDL.sql, SAM 템플릿 일부 | 0.5일 ✅ |
+| **P2** | Ansible ECS Task Definition + Dockerfile + `build_inventory.py` + `upload_to_s3.py` | ECR 이미지, Task Def | 1일 |
 | **P3** | `ONPREM_UNIX.yml` playbook (가장 표준화 쉬움 — 우선 검증) | playbook, 샘플 결과 JSON | 1일 |
-| **P4** | Lambda `asset_enrich` agent — `onprem_unix.py` 매퍼만 | Lambda 함수, ddl.sql | 1일 |
-| **P5** | EventBridge rule `rule_onprem_unix` + 통합 E2E 테스트 | SAM 배포 | 0.5일 |
-| **P6** | `IDC_NW.yml` + `idc_nw.py` 매퍼 (모델/펌웨어 → PSIRT 매칭 키) | playbook + 매퍼 | 1일 |
-| **P7** | `STORE_NW.yml` + `store_nw.py` 매퍼 (P6와 유사) | playbook + 매퍼 | 0.5일 |
-| **P8** | `STORE_PC.yml` + `store_pc.py` 매퍼 + 지역별 4 EventBridge rule | playbook + 매퍼 + WinRM 검증 | 3일 |
-| **P9** | `ahnlab_epp_collector` Lambda + tb_asset_security | Lambda + DDL | 1.5일 |
-| **합계** | | | **10일** |
+| **P4** | Lambda `asset_enrich` agent — `onprem_unix.py` 매퍼만 + 공통 handler | Lambda 함수 | 1일 |
+| **P5** | EPP ECS Task Definition + Dockerfile + `fetch_epp.py` (asyncio + httpx) + `epp.py` 매퍼 | ECR 이미지, Task Def, 매퍼 | 1.5일 |
+| **P6** | `IDC_NW.yml` + `STORE_NW.yml` playbook + `idc_nw.py`·`store_nw.py` 매퍼 | playbook + 매퍼 | 1일 |
+| **P7** | EventBridge rules 4종 + 통합 E2E 테스트 | SAM 배포 | 1일 |
+| **P8** (별도 트랙) | `ahnlab_epp_security_collector` Lambda + `tb_asset_security` 활용 (보안 정보) | Lambda + DDL | 1일 |
+| **합계** | | | **8일** |
 
-**P8 사전 검증 (별도)**:
-- 본사 → 점포 PC WinRM 라우팅 (포트 5985/5986) 방화벽 확인
-- AD 도메인 계정으로 5만대 인증 부하 검증
-- 점포당 1대 샘플로 PoC
+**변경 사항 (이전 v1 대비)**:
+- ❌ 폐기: `STORE_PC.yml` playbook + 지역별 4 EventBridge rule + WinRM 라우팅 검증 (3일 절감)
+- ✅ 신규: P5 EPP ECS Task (asyncio + httpx, 1.5일)
+- 순서 재정렬: 매퍼별 phase가 작아져 P6·P7로 통합
+
+**P5 사전 확인 (외부 협조 필요)**:
+- 안랩 EPP API endpoint·인증 방식 (안랩 측 문서/담당자 확인)
+- 안랩 EPP API rate limit (초기 `asyncio.Semaphore(100)` 설정 적합 여부)
+- EPP 응답의 자산 분류 필드 정의 (점포/사무실/기타 → category_cd 매핑 룰)
 
 ---
 
 ## 10. 운영 고려사항
 
 ### 10.1 모니터링
-- ECS Task CloudWatch Logs (수집 성공/실패)
+- ECS Task CloudWatch Logs (Ansible/EPP 각각, 수집 성공/실패)
 - Lambda 실행 메트릭 (asset_enrich 호출 수, 에러율)
 - DLQ 구성 (Lambda 실패 시)
 
 ### 10.2 비용 추정
-- ECS Fargate: $0.04/vCPU/hour, $0.004/GB/hour
-  - 일일 평균 1시간 실행 × 5 카테고리 = ~$1/일 = **$30/월**
-- 점포 PC 주 1회 4지역 병렬 (2시간 × 4 Task) = ~$2/주 = **$10/월**
-- S3 저장: 카테고리당 1 JSONL.gz (gzip 압축 후 ~5MB) × 7 파일/주 × 12주 보관 = ~0.5GB = **$0.01/월** (무시)
-- Lambda 호출: 7/주 = ~30/월 × $0.0000002 = **무시**
-- **총 ~$40/월** (당초 ~$50 → 파일 수 단순화로 절감)
+
+**Ansible 트랙** (3 카테고리 × 일 1회):
+- ECS Fargate 2 vCPU 4GB × ~30분/Task × 3 Task/일 = ~$0.30/일 = **~$9/월**
+
+**EPP 트랙** (1 Task × 일 1회):
+- ECS Fargate 2 vCPU 4GB × ~20분/일 = ~$0.05/일 = **~$1.5/월**
+
+**S3 저장**:
+- JSONL.gz × 4 파일/일 × 90일 = ~2GB = **~$0.05/월** (무시)
+
+**Lambda 호출**:
+- 4/일 × 30일 = 120/월 × $0.0000002 = **무시**
+
+**총 ~$11/월** (이전 추정 $50 → 점포 PC Ansible 폐기로 대폭 절감)
 
 ### 10.3 보안
 - Secrets Manager에 SSH 키·AD 계정 보관 (KMS 암호화)

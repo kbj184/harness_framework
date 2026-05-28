@@ -369,11 +369,27 @@ Resources:
 
   # ──────────────────────────────────────────────────────────────────────
   # asset_enrich — P1
-  # ECS Ansible Container 가 카테고리별 JSON 결과를 업로드하는 S3 버킷.
-  # Key 컨벤션: s3://gsretail-asset-enrich/{CATEGORY}/{hostname}/{date}.json
+  #
+  # 2 트랙 ECS 컨테이너(Ansible / EPP)가 결과를 업로드하는 공통 S3 버킷.
+  #
+  #   Track A — Ansible (ECS Fargate · SSH/CLI)
+  #     Key:  s3://gsretail-asset-enrich/{IDC_NW|ONPREM_UNIX|STORE_NW}/{date}.jsonl.gz
+  #
+  #   Track B — EPP (ECS Fargate · asyncio + httpx)
+  #     Key:  s3://gsretail-asset-enrich/EPP/{date}.jsonl.gz
+  #     (카테고리는 JSONL 줄별 category_cd 필드로: EPP_STORE_OA/EPP_OFFICE_OA/EPP_ETC_SERVER)
+  #
   # Lifecycle: 30일 후 INTELLIGENT_TIERING, 90일 후 GLACIER, 365일 후 삭제.
-  # Lambda(AssetEnrichFunction)·ECS Task 는 P4 이후 단계에서 추가.
+  #
+  # 후속 단계 (P2~P7):
+  #   - AssetEnrichCluster (ECS Cluster, Ansible/EPP Task 공유)
+  #   - AssetEnrichAnsibleTaskDefinition (Ansible 이미지)
+  #   - AssetEnrichEppTaskDefinition (EPP 이미지)
+  #   - AssetEnrichFunction (Lambda, S3 트리거)
+  #   - EventBridge rules 4종 (Ansible 3 + EPP 1)
+  #
   # 참조: src/agents/asset_enrich/README.md
+  #       docs/asset-enrich-pipeline.md (v2.0)
   # ──────────────────────────────────────────────────────────────────────
   AssetEnrichBucket:
     Type: AWS::S3::Bucket
