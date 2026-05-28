@@ -46,4 +46,5 @@ sam deploy                       # AWS 배포 (samconfig.toml 사용)
 | `kev_collector` | CISA KEV 카탈로그 수집 | httpx → `tb_kev_catalog` 직접 upsert |
 | `epss_collector` | FIRST EPSS 점수 수집 | httpx CSV → DB 직접 upsert |
 | `nvd_collector` | NVD CVE 수집 (days_back 옵션) | NVD API → DB 직접 upsert |
+| `mitre_cwe_collector` | MITRE CWE 약점 사전 수집 (분기 1회) | cwec_latest.xml.zip → `tb_cwe_dictionary` |
 | `rag_embedder` | CMDB 데이터 Bedrock 임베딩 | Bedrock Cohere v4 → pgvector |
