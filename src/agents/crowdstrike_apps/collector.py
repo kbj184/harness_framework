@@ -43,6 +43,16 @@ def fetch_all_app_ids(
             params: dict[str, Any] = {"limit": page_size, "offset": offset, "sort": "last_used_timestamp|desc"}
             if filter_expr:
                 params["filter"] = filter_expr
+            # CrowdStrike Discover API 는 offset 10,000 이 상한 — 그 이상 요청 시 400
+            # total > 10,000 인 경우 filter 분할 권장 (last_used_timestamp 기간 분할)
+            if offset >= 10000:
+                logger.warning(
+                    "CrowdStrike Discover offset 10,000 한계 도달 — 잔여 %s 건 미수집 "
+                    "(filter 분할 필요)",
+                    body.get("meta", {}).get("pagination", {}).get("total"),
+                )
+                break
+
             r = c.get(f"{base_url}/discover/queries/applications/v1", headers=headers, params=params)
             r.raise_for_status()
             body = r.json()
