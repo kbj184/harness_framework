@@ -58,6 +58,14 @@ Parameters:
     Type: String
     Default: "cron(0 19 * * ? *)"
     Description: KISA 보안공지 수집 스케줄 (일 1회 UTC 19:00 = KST 04:00)
+  PsirtScheduleExpression:
+    Type: String
+    Default: "cron(0 19 * * ? *)"
+    Description: 네트워크 장비 PSIRT 4벤더 통합 수집 (일 1회 UTC 19:00 = KST 04:00)
+  CiscoPsirtSecretName:
+    Type: String
+    Default: cmdb/psirt/cisco
+    Description: Cisco openVuln API OAuth Token (옵션 — 미설정 시 Cisco skip)
   CsAlertsScheduleExpression:
     Type: String
     Default: "rate(15 minutes)"
@@ -347,6 +355,37 @@ Resources:
       DockerContext: .
       DockerTag: latest
 
+  PsirtCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-psirt-collector-${Environment}"
+      Description: 네트워크 장비 PSIRT 4벤더 통합 → tb_vendor_advisory UPSERT (Cisco/F5/PA/Forti)
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+          CISCO_PSIRT_SECRET_NAME: !Ref CiscoPsirtSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${CiscoPsirtSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref PsirtScheduleExpression
+            Description: PSIRT 4벤더 일 1회 수집 (KST 04:00)
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/psirt_collector/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
   CrowdStrikeAlertsCollectorFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -566,6 +605,12 @@ Outputs:
   KisaCollectorFunctionName:
     Description: KISA Collector Lambda 함수명
     Value: !Ref KisaCollectorFunction
+  PsirtCollectorFunctionArn:
+    Description: PSIRT Collector Lambda ARN
+    Value: !GetAtt PsirtCollectorFunction.Arn
+  PsirtCollectorFunctionName:
+    Description: PSIRT Collector Lambda 함수명
+    Value: !Ref PsirtCollectorFunction
   SbomBucketArn:
     Description: SBOM 업로드 S3 버킷 ARN (Ansible playbook 업로드 대상)
     Value: !GetAtt SbomBucket.Arn

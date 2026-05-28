@@ -18,6 +18,7 @@ image_repositories = [
   "MitreCweCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-mitre-cwe-collector",
   "ExploitSignalCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-exploit-signal-collector",
   "KisaCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-kisa-collector",
+  "PsirtCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-psirt-collector",
 ]
 
 [default.build]

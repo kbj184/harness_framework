@@ -49,4 +49,5 @@ sam deploy                       # AWS 배포 (samconfig.toml 사용)
 | `mitre_cwe_collector` | MITRE CWE 약점 사전 수집 (분기 1회) | cwec_latest.xml.zip → `tb_cwe_dictionary` |
 | `exploit_signal_collector` | Exploit-DB + Metasploit 신호 수집 (rate 15min, Pre-EPSS 선행) | CSV + JSON → `tb_exploit_signal` |
 | `kisa_collector` | KISA 보안공지 RSS 수집 (일 1회, Trivy 미커버 한국 advisory) | RSS → `tb_vendor_advisory` |
+| `psirt_collector` | 네트워크 장비 PSIRT 4벤더 통합 (Cisco openVuln + F5/PA/Forti RSS) | API + RSS → `tb_vendor_advisory` (PSIRT_*) |
 | `rag_embedder` | CMDB 데이터 Bedrock 임베딩 | Bedrock Cohere v4 → pgvector |
