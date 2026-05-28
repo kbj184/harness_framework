@@ -1,32 +1,49 @@
 """KISA 보안공지 수집 (Trivy 미커버 — 한국 한정 advisory).
 
-RSS feed 일 1회 폴링 → 각 공지에서 CVE 추출 → tb_vendor_advisory UPSERT.
+KISA 공식 RSS feed 미제공 (2026-05-28 확인). 대신 보안공지 게시판 HTML
+스크래핑으로 수집:
+  - 목록 페이지: bbs/list.do?menuNo=205020&bbsId=B0000133
+  - 게시물 행: <tr><td class="num">번호</td><td class="sbj tal"><a href="...">제목</a></td>
+              <td>등록일</td>...
+  - 게시물 URL: bbs/view.do?...&nttId=NNNNN
+
+CVE 는 제목·본문에서 정규식 추출.
 """
 
 from __future__ import annotations
 
 import hashlib
+import html
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 from urllib.parse import parse_qs, urlparse
-from xml.etree import ElementTree as ET
 
 import httpx
 
 logger = logging.getLogger("collect_cmdb")
 
-# KISA 보안공지 — 2026-05-28 확인: 공식 RSS feed 미제공.
-# 운영 환경 적용 전에 다음 중 하나 결정 필요:
-#   (1) HTML 스크래핑 (parse_kisa_rss 대체) — https://www.boho.or.kr/kr/bbs/list.do?bbsId=B0000133
-#   (2) KISA C-TAS 회원 가입 후 API token (별도)
-#   (3) 제휴 RSS feed (벤더사 보안 권고 통합)
-# 현재 placeholder URL 유지 — Lambda 호출 시 404 로 즉시 종료.
-KISA_RSS_URL = "https://www.boho.or.kr/krcert/secNoticeListRss.do"
+KISA_LIST_URL = "https://www.boho.or.kr/kr/bbs/list.do?menuNo=205020&bbsId=B0000133"
+KISA_VIEW_BASE = "https://www.boho.or.kr"
+
+# RSS 호환 함수명 유지 — handler 가 import 함
+KISA_RSS_URL = KISA_LIST_URL                              # 별칭
 
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+
+# 게시물 행 매칭 — <tr> 안에 num/title/date 컬럼이 순서대로
+ROW_RE = re.compile(
+    r'<tr[^>]*>\s*'
+    r'<td[^>]*class="num"[^>]*>(?P<num>[^<]*)</td>\s*'
+    r'<td[^>]*class="sbj[^"]*"[^>]*>\s*'
+    r'<a\s+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+# 등록일 컬럼 — 행 안 어딘가 yyyy-mm-dd 형태
+DATE_RE = re.compile(r"\b(20\d{2})[-./](\d{1,2})[-./](\d{1,2})\b")
 
 
 @dataclass
@@ -43,70 +60,92 @@ class KisaAdvisory:
 def extract_advisory_id(link: str) -> str:
     """KISA link URL 에서 advisory_id 추출.
 
-    Pattern 1: ?bulletin_writing_sequence=12345 → KISA-12345
-    Pattern 2: seq 없으면 URL 해시 fallback
+    Pattern 1: ?nttId=12345 → KISA-12345 (HTML 게시판)
+    Pattern 2: ?bulletin_writing_sequence=12345 → KISA-12345 (legacy)
+    Pattern 3: 둘 다 없으면 URL 해시 fallback
     """
     parsed = urlparse(link)
     qs = parse_qs(parsed.query)
-    seq = qs.get("bulletin_writing_sequence", [None])[0]
+    seq = qs.get("nttId", [None])[0] or qs.get("bulletin_writing_sequence", [None])[0]
     if seq:
         return f"KISA-{seq}"
-    # fallback: URL 해시 (8자리)
     h = hashlib.md5(link.encode("utf-8")).hexdigest()[:8]
     return f"KISA-{h}"
 
 
-def _parse_pubdate(s: str | None) -> date | None:
-    """RSS pubDate (RFC 822) → date."""
+def _parse_date(s: str | None) -> date | None:
+    """yyyy-mm-dd 형태 추출."""
     if not s:
         return None
-    for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S"):
-        try:
-            return datetime.strptime(s.strip(), fmt).date()
-        except ValueError:
-            continue
-    return None
+    m = DATE_RE.search(s)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
 
 
-def fetch_kisa_rss(url: str = KISA_RSS_URL, timeout: int = 60) -> str:
-    """KISA 보안공지 RSS XML 다운로드."""
-    logger.info("KISA RSS 다운로드: %s", url)
+# RSS 호환 — 동일 이름 유지 (handler 가 import)
+_parse_pubdate = _parse_date
+
+
+def fetch_kisa_rss(url: str = KISA_LIST_URL, timeout: int = 60) -> str:
+    """KISA 보안공지 HTML 목록 페이지 다운로드 (RSS 호환 함수명).
+
+    HTML 게시판으로 전환됨 (RSS 미제공).
+    """
+    logger.info("KISA 목록 페이지 다운로드: %s", url)
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
         resp = client.get(url)
         resp.raise_for_status()
         text = resp.text
-    logger.info("KISA RSS %d bytes 다운로드 완료", len(text))
+    logger.info("KISA HTML %d bytes 다운로드 완료", len(text))
     return text
 
 
-def parse_kisa_rss(rss_text: str) -> list[KisaAdvisory]:
-    """RSS XML → KisaAdvisory 리스트. title + description 에서 CVE 추출."""
-    root = ET.fromstring(rss_text)
-    channel = root.find("channel")
-    if channel is None:
-        logger.warning("RSS channel element 없음")
-        return []
+def _strip_tags(s: str) -> str:
+    """간단 HTML 태그 제거 + entity decode."""
+    s = re.sub(r"<[^>]+>", "", s)
+    return html.unescape(s).strip()
 
+
+def parse_kisa_rss(html_text: str) -> list[KisaAdvisory]:
+    """KISA 게시판 HTML → KisaAdvisory 리스트 (RSS 호환 함수명).
+
+    행 단위로 <tr>...</tr> 매칭 후 num/sbj/제목/등록일 추출. CVE 는 제목에서
+    정규식 추출 (본문은 별도 fetch 안 함 — 목록 페이지 수준).
+    """
     items: list[KisaAdvisory] = []
-    for item in channel.findall("item"):
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        description = (item.findtext("description") or "").strip()
-        pub_raw = item.findtext("pubDate")
+    for tr_match in re.finditer(r"<tr[^>]*>(.*?)</tr>", html_text, re.DOTALL):
+        tr = tr_match.group(0)
+        row_m = ROW_RE.search(tr)
+        if not row_m:
+            continue
 
-        # CVE 는 title + description 양쪽에서 추출 후 dedupe (순서 보존)
+        href = html.unescape(row_m.group("href"))
+        if not href.startswith("http"):
+            href = KISA_VIEW_BASE + href
+
+        title = _strip_tags(row_m.group("title"))
+        if not title:
+            continue
+
+        # 등록일 — <tr> 안에 yyyy-mm-dd
+        pub_date = _parse_date(tr)
+
+        # CVE 는 제목에서만 추출 (본문 fetch 부담 회피)
         cve_set: dict[str, None] = {}
-        for source in (title, description):
-            for m in CVE_PATTERN.finditer(source):
-                cve_set[m.group(0).upper()] = None
+        for m in CVE_PATTERN.finditer(title):
+            cve_set[m.group(0).upper()] = None
 
         items.append(KisaAdvisory(
-            advisory_id=extract_advisory_id(link),
+            advisory_id=extract_advisory_id(href),
             title=title,
-            description=description,
+            description="",                     # 목록 페이지엔 본문 없음
             cve_ids=list(cve_set.keys()),
-            source_url=link,
-            published_at=_parse_pubdate(pub_raw),
+            source_url=href,
+            published_at=pub_date,
         ))
 
     logger.info("KISA 공지 %d건 파싱 완료", len(items))

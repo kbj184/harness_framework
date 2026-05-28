@@ -1,6 +1,7 @@
 """KISA Collector 단위 테스트 (TDD).
 
-KISA(한국인터넷진흥원) 보안공지 RSS 파싱 + tb_vendor_advisory UPSERT.
+KISA 보안공지 HTML 게시판 스크래핑 + tb_vendor_advisory UPSERT.
+(공식 RSS 미제공 — 2026-05-28 확인 후 HTML scrape 로 전환)
 """
 
 from __future__ import annotations
@@ -10,101 +11,122 @@ from unittest.mock import MagicMock
 
 from src.agents.kisa_collector.collector import (
     extract_advisory_id,
-    parse_kisa_rss,
+    parse_kisa_rss,                                   # HTML 입력으로 변경됨
     transform_kisa,
     upsert_advisory_rows,
 )
 
 
-# ───────────────────── KISA RSS 샘플 (실제 구조 모사) ─────────────────────
-# KISA 보안공지 RSS — 일반적 RSS 2.0 + KISA 특유 link query string
-KISA_RSS = """<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-  <channel>
-    <title>KISA 보안공지</title>
-    <link>https://www.boho.or.kr/krcert/secNoticeList.do</link>
-    <description>KISA 보안공지 RSS</description>
-    <item>
-      <title>[보안권고] OpenSSL 보안 취약점 (CVE-2024-1234)</title>
-      <link>https://www.boho.or.kr/krcert/secNoticeView.do?bulletin_writing_sequence=12345</link>
-      <description>OpenSSL 3.5.5 이하 버전에 영향. 즉시 업데이트 권고.</description>
-      <pubDate>Fri, 15 Mar 2024 09:00:00 +0900</pubDate>
-    </item>
-    <item>
-      <title>[보안공지] 한컴오피스 다중 취약점 (CVE-2024-9999, CVE-2024-9998)</title>
-      <link>https://www.boho.or.kr/krcert/secNoticeView.do?bulletin_writing_sequence=12346</link>
-      <description>한컴오피스 2022 이전 버전 영향. 패치 적용 권고.</description>
-      <pubDate>Mon, 01 Apr 2024 10:00:00 +0900</pubDate>
-    </item>
-    <item>
-      <title>[일반공지] 보안 인식 캠페인 안내</title>
-      <link>https://www.boho.or.kr/krcert/secNoticeView.do?bulletin_writing_sequence=12347</link>
-      <description>4월 보안 인식 캠페인 안내. CVE 정보 없음.</description>
-      <pubDate>Tue, 02 Apr 2024 11:00:00 +0900</pubDate>
-    </item>
-  </channel>
-</rss>
+# ───────────────────── KISA HTML 게시판 샘플 ─────────────────────
+# 실제 구조: <tr><td class="num">번호</td><td class="sbj tal"><a href="...nttId=...">제목</a></td><td>등록일</td>
+KISA_HTML = """
+<html><body>
+<table class="board_list">
+  <tbody>
+    <tr>
+      <td class="num">2442</td>
+      <td class="sbj tal">
+        <a href="/kr/bbs/view.do?menuNo=205020&amp;bbsId=B0000133&amp;nttId=72071">
+          7-Zip 제품 보안 업데이트 권고 (CVE-2026-1234)
+        </a>
+      </td>
+      <td class="writer">KISA</td>
+      <td class="date">2026-05-15</td>
+    </tr>
+    <tr>
+      <td class="num">2441</td>
+      <td class="sbj tal">
+        <a href="/kr/bbs/view.do?menuNo=205020&amp;bbsId=B0000133&amp;nttId=72069">
+          한컴오피스 다중 취약점 (CVE-2026-9999, CVE-2026-9998)
+        </a>
+      </td>
+      <td class="writer">KISA</td>
+      <td class="date">2026-05-10</td>
+    </tr>
+    <tr>
+      <td class="num">2440</td>
+      <td class="sbj tal">
+        <a href="/kr/bbs/view.do?menuNo=205020&amp;bbsId=B0000133&amp;nttId=72068">
+          NVIDIA 제품 보안 권고
+        </a>
+      </td>
+      <td class="writer">KISA</td>
+      <td class="date">2026-05-05</td>
+    </tr>
+  </tbody>
+</table>
+</body></html>
 """
 
 
 class TestExtractAdvisoryId:
-    def test_from_kisa_link(self):
+    def test_from_nttid(self):
+        link = "https://www.boho.or.kr/kr/bbs/view.do?menuNo=205020&bbsId=B0000133&nttId=72071"
+        assert extract_advisory_id(link) == "KISA-72071"
+
+    def test_legacy_bulletin_seq(self):
         link = "https://www.boho.or.kr/krcert/secNoticeView.do?bulletin_writing_sequence=12345"
         assert extract_advisory_id(link) == "KISA-12345"
 
-    def test_extra_params(self):
-        link = "https://www.boho.or.kr/krcert/secNoticeView.do?foo=bar&bulletin_writing_sequence=99&baz=qux"
-        assert extract_advisory_id(link) == "KISA-99"
-
-    def test_no_seq_param(self):
-        """seq 없는 경우 URL hash 기반 fallback."""
+    def test_no_id_param(self):
+        """nttId / bulletin seq 둘 다 없으면 URL 해시 fallback."""
         link = "https://www.boho.or.kr/krcert/foo.do?x=y"
         result = extract_advisory_id(link)
         assert result.startswith("KISA-") and len(result) > 5
 
 
-class TestParseKisaRss:
+class TestParseKisaHtml:
     def test_extracts_all_items(self):
-        items = parse_kisa_rss(KISA_RSS)
+        items = parse_kisa_rss(KISA_HTML)
         assert len(items) == 3
 
-    def test_fields_populated(self):
-        items = parse_kisa_rss(KISA_RSS)
-        first = items[0]
-        assert first.advisory_id == "KISA-12345"
-        assert "OpenSSL" in first.title
-        assert first.published_at == date(2024, 3, 15)
+    def test_advisory_id(self):
+        items = parse_kisa_rss(KISA_HTML)
+        ids = sorted(i.advisory_id for i in items)
+        assert ids == ["KISA-72068", "KISA-72069", "KISA-72071"]
+
+    def test_title_clean(self):
+        items = parse_kisa_rss(KISA_HTML)
+        first = next(i for i in items if i.advisory_id == "KISA-72071")
+        assert "7-Zip" in first.title
+        assert "<" not in first.title and "&amp;" not in first.title
 
     def test_cve_extraction(self):
-        items = parse_kisa_rss(KISA_RSS)
-        openssl = items[0]
-        assert openssl.cve_ids == ["CVE-2024-1234"]
+        items = parse_kisa_rss(KISA_HTML)
+        zip7 = next(i for i in items if i.advisory_id == "KISA-72071")
+        assert zip7.cve_ids == ["CVE-2026-1234"]
 
-        hancom = items[1]
-        assert "CVE-2024-9999" in hancom.cve_ids
-        assert "CVE-2024-9998" in hancom.cve_ids
+        hancom = next(i for i in items if i.advisory_id == "KISA-72069")
+        assert "CVE-2026-9999" in hancom.cve_ids
+        assert "CVE-2026-9998" in hancom.cve_ids
 
     def test_no_cve_item(self):
-        """일반공지(CVE 없음)도 포함하되 cve_ids 는 빈 배열."""
-        items = parse_kisa_rss(KISA_RSS)
-        general = items[2]
-        assert general.cve_ids == []
-        assert general.advisory_id == "KISA-12347"
+        """제목에 CVE 없으면 cve_ids 빈 배열."""
+        items = parse_kisa_rss(KISA_HTML)
+        nvidia = next(i for i in items if i.advisory_id == "KISA-72068")
+        assert nvidia.cve_ids == []
 
-    def test_source_url_preserved(self):
-        items = parse_kisa_rss(KISA_RSS)
-        assert "12345" in items[0].source_url
+    def test_source_url_absolute(self):
+        """상대 경로 → 절대 URL 변환."""
+        items = parse_kisa_rss(KISA_HTML)
+        first = next(i for i in items if i.advisory_id == "KISA-72071")
+        assert first.source_url.startswith("https://www.boho.or.kr/")
+        assert "nttId=72071" in first.source_url
+
+    def test_published_at(self):
+        items = parse_kisa_rss(KISA_HTML)
+        first = next(i for i in items if i.advisory_id == "KISA-72071")
+        assert first.published_at == date(2026, 5, 15)
 
 
 class TestTransformKisa:
     def test_to_db_rows(self):
-        items = parse_kisa_rss(KISA_RSS)
+        items = parse_kisa_rss(KISA_HTML)
         rows = transform_kisa(items)
         assert len(rows) == 3
-        first = rows[0]
-        assert first["advisory_id"] == "KISA-12345"
+        first = next(r for r in rows if r["advisory_id"] == "KISA-72071")
         assert first["vendor_source"] == "KISA"
-        assert first["cve_ids"] == ["CVE-2024-1234"]
+        assert first["cve_ids"] == ["CVE-2026-1234"]
         assert first["source_url"]
 
 
@@ -116,7 +138,7 @@ class TestUpsertAdvisoryRows:
         conn = MagicMock()
         conn.cursor = MagicMock(return_value=cursor)
 
-        items = parse_kisa_rss(KISA_RSS)
+        items = parse_kisa_rss(KISA_HTML)
         rows = transform_kisa(items)
         count = upsert_advisory_rows(conn, rows)
         assert count == 3
