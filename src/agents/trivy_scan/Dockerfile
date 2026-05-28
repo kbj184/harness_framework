@@ -1,6 +1,6 @@
 FROM public.ecr.aws/lambda/python:3.12
 
-ARG TRIVY_VERSION=0.59.0
+ARG TRIVY_VERSION=0.70.0
 
 # Trivy 바이너리 설치 (단일 binary)
 RUN dnf install -y tar gzip && \

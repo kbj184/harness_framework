@@ -23,9 +23,12 @@ logger = logging.getLogger("collect_cmdb")
 CISCO_OPENVULN_URL = (
     "https://apix.cisco.com/security/advisories/v2/all"  # OAuth 필요
 )
-F5_PSIRT_RSS_URL = "https://my.f5.com/manage/s/securityadvisories.rss"        # placeholder
-PALOALTO_RSS_URL = "https://security.paloaltonetworks.com/rss.xml"
-FORTINET_RSS_URL = "https://www.fortiguard.com/rss/psirt.xml"                  # placeholder
+# F5 / Fortinet 은 2026-05-28 확인: 공식 RSS feed 미제공 (로그인 페이지 또는 HTML 응답).
+# 실제 운영 시 HTML 스크래퍼 또는 인증 API 별도 구축 필요.
+# 현재 placeholder URL — Lambda 호출 시 fetch 실패 → skip 처리 (handler.py 의 try/except).
+F5_PSIRT_RSS_URL = "https://support.f5.com/csp/security-advisories.rss"        # placeholder (HTML 응답)
+PALOALTO_RSS_URL = "https://security.paloaltonetworks.com/rss.xml"             # 정상 동작
+FORTINET_RSS_URL = "https://www.fortiguard.com/rss/psirt.xml"                  # placeholder (500 응답)
 
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 

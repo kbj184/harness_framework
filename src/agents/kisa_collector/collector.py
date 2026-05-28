@@ -18,7 +18,12 @@ import httpx
 
 logger = logging.getLogger("collect_cmdb")
 
-# KISA 보안공지 RSS (실제 endpoint 는 운영 환경에서 확정)
+# KISA 보안공지 — 2026-05-28 확인: 공식 RSS feed 미제공.
+# 운영 환경 적용 전에 다음 중 하나 결정 필요:
+#   (1) HTML 스크래핑 (parse_kisa_rss 대체) — https://www.boho.or.kr/kr/bbs/list.do?bbsId=B0000133
+#   (2) KISA C-TAS 회원 가입 후 API token (별도)
+#   (3) 제휴 RSS feed (벤더사 보안 권고 통합)
+# 현재 placeholder URL 유지 — Lambda 호출 시 404 로 즉시 종료.
 KISA_RSS_URL = "https://www.boho.or.kr/krcert/secNoticeListRss.do"
 
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)

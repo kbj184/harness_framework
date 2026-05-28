@@ -194,7 +194,7 @@ INSERT INTO tb_asset_vulnerability (
     %(fixed_version)s, %(cvss_score)s, %(status)s,
     NOW(), NOW()
 )
-ON CONFLICT (asset_id_hash, cve_id, matched_pkg) DO UPDATE SET
+ON CONFLICT (asset_id_hash, cve_id, COALESCE(matched_pkg, '')) DO UPDATE SET
     match_type       = EXCLUDED.match_type,
     fixed_version    = EXCLUDED.fixed_version,
     cvss_score       = COALESCE(EXCLUDED.cvss_score, tb_asset_vulnerability.cvss_score),
