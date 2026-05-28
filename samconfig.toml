@@ -16,6 +16,7 @@ image_repositories = [
   "NvdCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-nvd-collector",
   "CrowdStrikeAlertsCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-cs-alerts-collector",
   "MitreCweCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-mitre-cwe-collector",
+  "ExploitSignalCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-exploit-signal-collector",
 ]
 
 [default.build]

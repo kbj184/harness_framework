@@ -47,4 +47,5 @@ sam deploy                       # AWS 배포 (samconfig.toml 사용)
 | `epss_collector` | FIRST EPSS 점수 수집 | httpx CSV → DB 직접 upsert |
 | `nvd_collector` | NVD CVE 수집 (days_back 옵션) | NVD API → DB 직접 upsert |
 | `mitre_cwe_collector` | MITRE CWE 약점 사전 수집 (분기 1회) | cwec_latest.xml.zip → `tb_cwe_dictionary` |
+| `exploit_signal_collector` | Exploit-DB + Metasploit 신호 수집 (rate 15min, Pre-EPSS 선행) | CSV + JSON → `tb_exploit_signal` |
 | `rag_embedder` | CMDB 데이터 Bedrock 임베딩 | Bedrock Cohere v4 → pgvector |
