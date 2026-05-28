@@ -11,10 +11,88 @@ from unittest.mock import MagicMock
 from src.agents.psirt_collector.collector import (
     extract_affected_versions,
     parse_cisco_advisories,
+    parse_fortinet_html,
     parse_psirt_rss,
     transform_psirt,
     upsert_advisory_rows,
 )
+
+
+# ───────────────────── Fortinet PSIRT HTML 샘플 (fortiguard.com/psirt 구조 모사) ─────────────────────
+
+FORTINET_HTML = """
+<html><body>
+<section class="table-body">
+  <div class="container-xxl">
+    <div class="row" onclick="location.href = '/psirt/FG-IR-26-131'">
+      <div class="col-md-3">
+        <b>FG-IR-26-131 Command injection in CLI</b>
+        <br>
+        <b class="cve">CVE-2025-53680</b>
+      </div>
+      <div class="col-md-2">
+        <p><b> Medium </b></p>
+      </div>
+    </div>
+    <div class="row" onclick="location.href = '/psirt/FG-IR-26-137'">
+      <div class="col-md-3">
+        <b>FG-IR-26-137 DoS due to unsafe function</b>
+        <br>
+        <b class="cve">CVE-2025-67604</b>
+      </div>
+      <div class="col-md-2">
+        <p><b> High </b></p>
+      </div>
+    </div>
+    <div class="row" onclick="location.href = '/psirt/FG-IR-26-136'">
+      <div class="col-md-3">
+        <b>FG-IR-26-136 Incorrect authorization (CVE-less)</b>
+      </div>
+      <div class="col-md-2">
+        <p><b> Critical </b></p>
+      </div>
+    </div>
+  </div>
+</section>
+</body></html>
+"""
+
+
+class TestParseFortinetHtml:
+    def test_extracts_items(self):
+        items = parse_fortinet_html(FORTINET_HTML)
+        assert len(items) == 3
+
+    def test_advisory_ids(self):
+        items = parse_fortinet_html(FORTINET_HTML)
+        ids = sorted(i.advisory_id for i in items)
+        assert ids == ["FG-IR-26-131", "FG-IR-26-136", "FG-IR-26-137"]
+
+    def test_vendor_source(self):
+        items = parse_fortinet_html(FORTINET_HTML)
+        assert all(i.vendor_source == "PSIRT_FORTI" for i in items)
+
+    def test_cve_extraction(self):
+        items = parse_fortinet_html(FORTINET_HTML)
+        first = next(i for i in items if i.advisory_id == "FG-IR-26-131")
+        assert first.cve_ids == ["CVE-2025-53680"]
+
+    def test_no_cve_item(self):
+        items = parse_fortinet_html(FORTINET_HTML)
+        no_cve = next(i for i in items if i.advisory_id == "FG-IR-26-136")
+        assert no_cve.cve_ids == []
+
+    def test_severity_lowercased(self):
+        items = parse_fortinet_html(FORTINET_HTML)
+        sev_map = {i.advisory_id: i.severity for i in items}
+        assert sev_map["FG-IR-26-131"] == "medium"
+        assert sev_map["FG-IR-26-137"] == "high"
+        assert sev_map["FG-IR-26-136"] == "critical"
+
+    def test_source_url_absolute(self):
+        items = parse_fortinet_html(FORTINET_HTML)
+        first = next(i for i in items if i.advisory_id == "FG-IR-26-131")
+        assert first.source_url == "https://www.fortiguard.com/psirt/FG-IR-26-131"
 
 
 # ───────────────────── Cisco openVuln API JSON 샘플 ─────────────────────

@@ -23,12 +23,17 @@ logger = logging.getLogger("collect_cmdb")
 CISCO_OPENVULN_URL = (
     "https://apix.cisco.com/security/advisories/v2/all"  # OAuth 필요
 )
-# F5 / Fortinet 은 2026-05-28 확인: 공식 RSS feed 미제공 (로그인 페이지 또는 HTML 응답).
-# 실제 운영 시 HTML 스크래퍼 또는 인증 API 별도 구축 필요.
-# 현재 placeholder URL — Lambda 호출 시 fetch 실패 → skip 처리 (handler.py 의 try/except).
+# F5 은 myF5 로그인 페이지 (인증 필요) — placeholder.
 F5_PSIRT_RSS_URL = "https://support.f5.com/csp/security-advisories.rss"        # placeholder (HTML 응답)
-PALOALTO_RSS_URL = "https://security.paloaltonetworks.com/rss.xml"             # 정상 동작
-FORTINET_RSS_URL = "https://www.fortiguard.com/rss/psirt.xml"                  # placeholder (500 응답)
+PALOALTO_RSS_URL = "https://security.paloaltonetworks.com/rss.xml"             # 정상 동작 RSS
+# Fortinet 은 fortiguard.com/psirt HTML 스크래핑 (User-Agent 필수, 봇 차단 우회)
+FORTINET_PSIRT_URL = "https://www.fortiguard.com/psirt"
+FORTINET_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+# 구 변수 — handler 호환
+FORTINET_RSS_URL = FORTINET_PSIRT_URL
 
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
@@ -195,6 +200,65 @@ def parse_psirt_rss(
             published_at=_parse_rfc822_date(pub_raw),
         ))
     logger.info("%s RSS advisory %d건 파싱 완료", vendor_source, len(items))
+    return items
+
+
+# ───────────────────── Fortinet HTML (fortiguard.com/psirt) ─────────────────────
+
+def fetch_fortinet_html(url: str = FORTINET_PSIRT_URL, timeout: int = 60) -> str:
+    """Fortinet PSIRT 목록 페이지 HTML 다운로드.
+
+    봇 차단 우회 위해 브라우저 User-Agent 필수. RSS feed 는 미제공.
+    """
+    headers = {
+        "User-Agent": FORTINET_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    logger.info("Fortinet PSIRT HTML 다운로드: %s", url)
+    with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as c:
+        resp = c.get(url)
+        resp.raise_for_status()
+        return resp.text
+
+
+# Fortinet 목록 행 패턴 — onclick='/psirt/FG-IR-XX-XXX' 이후 행 내용
+FORTINET_ROW_RE = re.compile(
+    r"location\.href\s*=\s*'(/psirt/FG-IR-[0-9]+-[0-9]+)'.*?"
+    r"<b>(FG-IR-[0-9]+-[0-9]+)\s+(.*?)</b>"
+    r"(?:.*?<b\s+class=\"cve\">(CVE-[0-9]+-[0-9]+)</b>)?"
+    r".*?<b>\s*(Critical|High|Medium|Low)\s*</b>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def parse_fortinet_html(html_text: str) -> list[PsirtAdvisory]:
+    """Fortinet PSIRT 목록 페이지 HTML → PsirtAdvisory 리스트.
+
+    각 행 구조 (요약):
+      <div class="row" onclick="location.href = '/psirt/FG-IR-XX-XXX'">
+        <div><b>FG-IR-XX-XXX Title</b><br><b class="cve">CVE-YYYY-NNNN</b></div>
+        ... <b>Severity</b> ...
+    """
+    items: list[PsirtAdvisory] = []
+    seen: set[str] = set()
+    for m in FORTINET_ROW_RE.finditer(html_text):
+        href, advisory_id, title, cve, severity = m.groups()
+        if advisory_id in seen:
+            continue
+        seen.add(advisory_id)
+        items.append(PsirtAdvisory(
+            advisory_id=advisory_id,
+            vendor_source="PSIRT_FORTI",
+            title=title.strip(),
+            description="",
+            cve_ids=[cve.upper()] if cve else [],
+            severity=severity.lower() if severity else None,
+            affected_model="FortiOS / FortiGate",          # 대부분 FortiOS — 본문 fetch 시 정밀화
+            affected_version=None,
+            source_url=f"https://www.fortiguard.com{href}",
+            published_at=None,                              # 목록엔 날짜 미명시
+        ))
+    logger.info("Fortinet PSIRT advisory %d건 파싱 완료", len(items))
     return items
 
 

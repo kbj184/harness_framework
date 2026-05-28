@@ -13,11 +13,13 @@ from typing import Any
 
 from src.agents.psirt_collector.collector import (
     F5_PSIRT_RSS_URL,
-    FORTINET_RSS_URL,
+    FORTINET_PSIRT_URL,
     PALOALTO_RSS_URL,
     fetch_cisco_advisories,
+    fetch_fortinet_html,
     fetch_psirt_rss,
     parse_cisco_advisories,
+    parse_fortinet_html,
     parse_psirt_rss,
     transform_psirt,
     upsert_advisory_rows,
@@ -55,12 +57,21 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     started_at = datetime.now(UTC)
     logger.info("PSIRT 수집 시작", extra={"agent": "psirt_collector"})
 
+    def _collect_fortinet() -> list:
+        """Fortinet 은 HTML 스크래핑 (RSS 미제공). User-Agent 필요."""
+        try:
+            html_text = fetch_fortinet_html(FORTINET_PSIRT_URL)
+            return parse_fortinet_html(html_text)
+        except Exception:
+            logger.exception("Fortinet PSIRT 실패 (skip)")
+            return []
+
     try:
         # 4 벤더 병렬 수집 (한 벤더 실패해도 나머지 계속)
         cisco_items = _collect_cisco()
         f5_items = _collect_rss(F5_PSIRT_RSS_URL, "PSIRT_F5", "K")
         pa_items = _collect_rss(PALOALTO_RSS_URL, "PSIRT_PA", "PAN-SA-")
-        forti_items = _collect_rss(FORTINET_RSS_URL, "PSIRT_FORTI", "FG-IR-")
+        forti_items = _collect_fortinet()
 
         all_items = cisco_items + f5_items + pa_items + forti_items
         rows = transform_psirt(all_items)
