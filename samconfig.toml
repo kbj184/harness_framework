@@ -20,6 +20,7 @@ image_repositories = [
   "KisaCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-kisa-collector",
   "PsirtCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-psirt-collector",
   "TrivyScanFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-trivy-scan",
+  "VexCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-vex-collector",
 ]
 
 [default.build]
