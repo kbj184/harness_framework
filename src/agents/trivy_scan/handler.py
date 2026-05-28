@@ -18,6 +18,7 @@ from typing import Any
 
 from src.agents.trivy_scan.collector import (
     DEFAULT_CACHE_DIR,
+    diagnose_trivy,
     download_trivy_db,
     scan_asset,
 )
@@ -56,6 +57,12 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     started_at = datetime.now(UTC)
     mode = event.get("mode") or ("single" if event.get("asset_id_hash") else "all")
     logger.info("Trivy 스캔 시작 mode=%s", mode, extra={"agent": "trivy_scan"})
+
+    # ── 진단 모드 ──
+    if mode == "diagnose":
+        info = diagnose_trivy(db_cache_dir=TRIVY_CACHE_DIR)
+        logger.info("Trivy 진단 결과: %s", info)
+        return {"status": "DIAGNOSE", "info": info}
 
     # ── DB 갱신 모드 ──
     if mode == "db_refresh":

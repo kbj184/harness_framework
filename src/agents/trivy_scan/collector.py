@@ -29,7 +29,7 @@ QUERY_PACKAGES_SQL = """
 SELECT
     asset_id_hash,
     name, version, release, epoch, arch,
-    purl, ecosystem
+    purl, ecosystem, distribution
 FROM tb_asset_software
 WHERE asset_id_hash = %(asset_id_hash)s
   AND purl IS NOT NULL
@@ -45,18 +45,79 @@ def query_asset_software(conn, asset_id_hash: str) -> list[dict[str, Any]]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+# distribution → CycloneDX OS metadata 매핑 (Trivy 가 인식하는 family 명)
+# Trivy 지원 OS family 키: amazon / centos / rhel / oracle / fedora / alma / rocky /
+#   debian / ubuntu / suse / alpine / photon / windows
+DISTRIBUTION_TO_OS = {
+    # Amazon Linux 2023
+    "amzn2023": ("amazon", "2023"),
+    "amazon2023": ("amazon", "2023"),
+    "amzn2": ("amazon", "2"),
+    "amazon2": ("amazon", "2"),
+    # RHEL / CentOS / Rocky / Alma
+    "rhel7": ("rhel", "7"), "rhel8": ("rhel", "8"), "rhel9": ("rhel", "9"),
+    "el7": ("rhel", "7"), "el8": ("rhel", "8"), "el9": ("rhel", "9"),
+    "centos7": ("centos", "7"), "centos8": ("centos", "8"),
+    "rocky8": ("rocky", "8"), "rocky9": ("rocky", "9"),
+    "alma8": ("alma", "8"), "alma9": ("alma", "9"),
+    # Ubuntu / Debian
+    "ubuntu20.04": ("ubuntu", "20.04"), "ubuntu22.04": ("ubuntu", "22.04"),
+    "ubuntu24.04": ("ubuntu", "24.04"),
+    "debian11": ("debian", "11"), "debian12": ("debian", "12"),
+}
+
+
+def _infer_os(packages: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    """패키지 목록 첫 distribution 값으로 OS family/version 추정."""
+    for pkg in packages:
+        dist = (pkg.get("distribution") or "").strip().lower()
+        if dist and dist in DISTRIBUTION_TO_OS:
+            return DISTRIBUTION_TO_OS[dist]
+        # purl 에서 추정 fallback — pkg:rpm/amzn/... → amazon
+        purl = pkg.get("purl") or ""
+        if "pkg:rpm/amzn/" in purl:
+            return ("amazon", "2023")           # 기본값
+    return (None, None)
+
+
 # ───────────────────── SBOM 생성 (CycloneDX 1.5) ─────────────────────
 
 def build_cyclonedx_sbom(packages: list[dict[str, Any]]) -> str:
     """패키지 목록 → CycloneDX 1.5 JSON 문자열.
 
     purl 없는 패키지는 Trivy 가 매칭 못 하므로 제외.
+    Trivy 가 OS family 를 인식하도록 metadata.component 에 operating-system 추가.
     """
+    os_family, os_version = _infer_os(packages)
+
+    # purl namespace 정규화 (우리 transformer 의 약자 → Trivy 표준)
+    # 예: pkg:rpm/amzn/...  → pkg:rpm/amazon/...
+    purl_ns_map = {
+        "amzn":  "amazon",
+        "rhel":  "redhat",
+        "el":    "redhat",
+    }
+
+    def _normalize_purl(p: str) -> str:
+        if not p.startswith("pkg:rpm/"):
+            return p
+        # pkg:rpm/{ns}/{rest}
+        try:
+            _, _, after = p.partition("pkg:rpm/")
+            ns, slash, rest = after.partition("/")
+            if not slash:
+                return p
+            new_ns = purl_ns_map.get(ns, ns)
+            return f"pkg:rpm/{new_ns}/{rest}"
+        except Exception:
+            return p
+
     components = []
     for pkg in packages:
         purl = pkg.get("purl")
         if not purl:
             continue
+        purl = _normalize_purl(purl)
         components.append({
             "type": "library",
             "bom-ref": purl,
@@ -65,12 +126,21 @@ def build_cyclonedx_sbom(packages: list[dict[str, Any]]) -> str:
             "purl": purl,
         })
 
+    metadata: dict[str, Any] = {"timestamp": "2026-05-28T00:00:00Z"}
+    if os_family:
+        # Trivy 가 인식하는 표준 패턴 — CycloneDX metadata.component = OS
+        metadata["component"] = {
+            "type": "operating-system",
+            "name": os_family,
+            "version": os_version or "unknown",
+        }
+
     sbom = {
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
         "serialNumber": f"urn:uuid:{uuid.uuid4()}",
         "version": 1,
-        "metadata": {"timestamp": "2026-05-28T00:00:00Z"},
+        "metadata": metadata,
         "components": components,
     }
     return json.dumps(sbom, ensure_ascii=False)
@@ -94,9 +164,16 @@ def run_trivy_sbom(
         "--format", "json",
         "--skip-db-update",
         "--cache-dir", db_cache_dir,
-        "--quiet",
+        "--debug",
     ]
     logger.info("Trivy 실행: %s", " ".join(cmd))
+    # SBOM 파일 첫 1500자 로그 (디버그용)
+    try:
+        with open(sbom_path, "r", encoding="utf-8") as f:
+            sbom_preview = f.read(1500)
+        logger.info("SBOM preview (1500 chars): %s", sbom_preview)
+    except Exception:
+        pass
     try:
         proc = subprocess.run(
             cmd,
@@ -108,11 +185,71 @@ def run_trivy_sbom(
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"trivy 실행 타임아웃 ({timeout}s)") from e
 
+    # stderr 는 returncode 와 무관하게 항상 로깅 (Trivy 는 INFO 도 stderr 로 보냄)
+    if proc.stderr:
+        logger.info("Trivy stderr (%d bytes): %s", len(proc.stderr), proc.stderr[:2000])
+
     if proc.returncode != 0:
         raise RuntimeError(
             f"trivy 종료코드 {proc.returncode}, stderr: {proc.stderr[:500]}"
         )
     return proc.stdout
+
+
+def diagnose_trivy(db_cache_dir: str = DEFAULT_CACHE_DIR) -> dict[str, Any]:
+    """Trivy 환경 진단 — 버전 / 캐시 디렉터리 / DB 상태."""
+    import os
+
+    info: dict[str, Any] = {"cache_dir": db_cache_dir}
+
+    # 1) trivy version
+    try:
+        proc = subprocess.run(
+            ["trivy", "--version"], capture_output=True, text=True, timeout=30
+        )
+        info["version_stdout"] = proc.stdout
+        info["version_stderr"] = proc.stderr
+        info["version_rc"] = proc.returncode
+    except Exception as e:
+        info["version_err"] = str(e)
+
+    # 2) cache_dir 내용
+    try:
+        if os.path.isdir(db_cache_dir):
+            entries = []
+            for root, dirs, files in os.walk(db_cache_dir):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    try:
+                        entries.append({"path": fp, "size": os.path.getsize(fp)})
+                    except Exception:
+                        entries.append({"path": fp, "size": "?"})
+            info["cache_entries"] = entries[:50]
+            info["cache_total_files"] = len(entries)
+        else:
+            info["cache_dir_exists"] = False
+    except Exception as e:
+        info["cache_err"] = str(e)
+
+    # 3) /opt 디렉터리 권한
+    try:
+        info["opt_listing"] = os.listdir("/opt")
+    except Exception as e:
+        info["opt_err"] = str(e)
+
+    # 4) trivy --download-db-only 직접 실행 (강제 다운로드)
+    try:
+        proc = subprocess.run(
+            ["trivy", "--cache-dir", db_cache_dir, "image", "--download-db-only", "--debug"],
+            capture_output=True, text=True, timeout=300
+        )
+        info["dl_rc"] = proc.returncode
+        info["dl_stdout"] = proc.stdout[-1000:]
+        info["dl_stderr"] = proc.stderr[-2000:]
+    except Exception as e:
+        info["dl_err"] = str(e)
+
+    return info
 
 
 def download_trivy_db(
