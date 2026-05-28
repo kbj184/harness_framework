@@ -54,6 +54,10 @@ Parameters:
     Type: String
     Default: "rate(15 minutes)"
     Description: Exploit-DB + Metasploit 신호 수집 스케줄 (Pre-EPSS 선행 감지)
+  KisaScheduleExpression:
+    Type: String
+    Default: "cron(0 19 * * ? *)"
+    Description: KISA 보안공지 수집 스케줄 (일 1회 UTC 19:00 = KST 04:00)
   CsAlertsScheduleExpression:
     Type: String
     Default: "rate(15 minutes)"
@@ -314,6 +318,35 @@ Resources:
       DockerContext: .
       DockerTag: latest
 
+  KisaCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-kisa-collector-${Environment}"
+      Description: KISA 보안공지 RSS → tb_vendor_advisory UPSERT (Trivy 미커버 한국 한정)
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref KisaScheduleExpression
+            Description: KISA 보안공지 일 1회 수집 (KST 04:00)
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/kisa_collector/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
   CrowdStrikeAlertsCollectorFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -527,6 +560,12 @@ Outputs:
   ExploitSignalCollectorFunctionName:
     Description: Exploit Signal Collector Lambda 함수명
     Value: !Ref ExploitSignalCollectorFunction
+  KisaCollectorFunctionArn:
+    Description: KISA Collector Lambda ARN
+    Value: !GetAtt KisaCollectorFunction.Arn
+  KisaCollectorFunctionName:
+    Description: KISA Collector Lambda 함수명
+    Value: !Ref KisaCollectorFunction
   SbomBucketArn:
     Description: SBOM 업로드 S3 버킷 ARN (Ansible playbook 업로드 대상)
     Value: !GetAtt SbomBucket.Arn

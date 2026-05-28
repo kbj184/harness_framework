@@ -48,4 +48,5 @@ sam deploy                       # AWS 배포 (samconfig.toml 사용)
 | `nvd_collector` | NVD CVE 수집 (days_back 옵션) | NVD API → DB 직접 upsert |
 | `mitre_cwe_collector` | MITRE CWE 약점 사전 수집 (분기 1회) | cwec_latest.xml.zip → `tb_cwe_dictionary` |
 | `exploit_signal_collector` | Exploit-DB + Metasploit 신호 수집 (rate 15min, Pre-EPSS 선행) | CSV + JSON → `tb_exploit_signal` |
+| `kisa_collector` | KISA 보안공지 RSS 수집 (일 1회, Trivy 미커버 한국 advisory) | RSS → `tb_vendor_advisory` |
 | `rag_embedder` | CMDB 데이터 Bedrock 임베딩 | Bedrock Cohere v4 → pgvector |
