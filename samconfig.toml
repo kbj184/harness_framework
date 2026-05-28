@@ -19,6 +19,7 @@ image_repositories = [
   "ExploitSignalCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-exploit-signal-collector",
   "KisaCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-kisa-collector",
   "PsirtCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-psirt-collector",
+  "TrivyScanFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-trivy-scan",
 ]
 
 [default.build]

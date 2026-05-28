@@ -66,6 +66,14 @@ Parameters:
     Type: String
     Default: cmdb/psirt/cisco
     Description: Cisco openVuln API OAuth Token (옵션 — 미설정 시 Cisco skip)
+  TrivyScanScheduleExpression:
+    Type: String
+    Default: "cron(30 19 * * ? *)"
+    Description: Trivy 전체 자산 스캔 (일 1회 UTC 19:30 = KST 04:30, NVD 수집 다음)
+  TrivyDbRefreshScheduleExpression:
+    Type: String
+    Default: "rate(6 hours)"
+    Description: Trivy DB OCI 이미지 갱신 (6시간 — ghcr.io trivy-db pull)
   CsAlertsScheduleExpression:
     Type: String
     Default: "rate(15 minutes)"
@@ -386,6 +394,53 @@ Resources:
       DockerContext: .
       DockerTag: latest
 
+  # ───────────────────────────────────────────────────────────────────
+  # Trivy 매칭 엔진 — ★ CVE 시나리오 핵심
+  # 두 종류 EventBridge 트리거:
+  #   (1) 일 1회 전체 자산 스캔 (TrivyScanScheduleExpression)
+  #   (2) 6시간 DB 갱신 (TrivyDbRefreshScheduleExpression, mode=db_refresh)
+  # 메모리·디스크 크게 (Trivy DB ~700MB + SBOM JSON + 결과)
+  # ───────────────────────────────────────────────────────────────────
+  TrivyScanFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-trivy-scan-${Environment}"
+      Description: Trivy SBOM 스캔 → tb_asset_vulnerability INSERT (NVD+ALAS+RHSA+USN+MSRC+GHSA+OSV 통합)
+      Timeout: 900                      # 15분 — 전체 자산 순회
+      MemorySize: 3008                  # 3GB
+      EphemeralStorage:
+        Size: 4096                      # /tmp 4GB (SBOM·결과·DB 캐시 보조)
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+          TRIVY_CACHE_DIR: /opt/trivy-cache    # Dockerfile 에서 pre-download
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+      Events:
+        DailyScanEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref TrivyScanScheduleExpression
+            Description: Trivy 일일 전체 자산 스캔 (KST 04:30)
+            Enabled: true
+            Input: '{"mode":"all"}'
+        DbRefreshEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref TrivyDbRefreshScheduleExpression
+            Description: Trivy DB 6시간 갱신 (ghcr.io trivy-db pull)
+            Enabled: true
+            Input: '{"mode":"db_refresh"}'
+    Metadata:
+      Dockerfile: src/agents/trivy_scan/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
   CrowdStrikeAlertsCollectorFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -611,6 +666,12 @@ Outputs:
   PsirtCollectorFunctionName:
     Description: PSIRT Collector Lambda 함수명
     Value: !Ref PsirtCollectorFunction
+  TrivyScanFunctionArn:
+    Description: Trivy Scan Lambda ARN
+    Value: !GetAtt TrivyScanFunction.Arn
+  TrivyScanFunctionName:
+    Description: Trivy Scan Lambda 함수명
+    Value: !Ref TrivyScanFunction
   SbomBucketArn:
     Description: SBOM 업로드 S3 버킷 ARN (Ansible playbook 업로드 대상)
     Value: !GetAtt SbomBucket.Arn

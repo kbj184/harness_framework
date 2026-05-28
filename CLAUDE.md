@@ -50,4 +50,5 @@ sam deploy                       # AWS 배포 (samconfig.toml 사용)
 | `exploit_signal_collector` | Exploit-DB + Metasploit 신호 수집 (rate 15min, Pre-EPSS 선행) | CSV + JSON → `tb_exploit_signal` |
 | `kisa_collector` | KISA 보안공지 RSS 수집 (일 1회, Trivy 미커버 한국 advisory) | RSS → `tb_vendor_advisory` |
 | `psirt_collector` | 네트워크 장비 PSIRT 4벤더 통합 (Cisco openVuln + F5/PA/Forti RSS) | API + RSS → `tb_vendor_advisory` (PSIRT_*) |
+| `trivy_scan` | ★ Trivy 매칭 엔진 (NEVRA/purl 통합) — Docker 컨테이너 + Trivy 바이너리 번들 | tb_asset_software → CycloneDX SBOM → `trivy sbom` → `tb_asset_vulnerability` |
 | `rag_embedder` | CMDB 데이터 Bedrock 임베딩 | Bedrock Cohere v4 → pgvector |
