@@ -32,6 +32,17 @@ ENV/
 phases/**/phase*-output.json
 phases/**/step*-output.json
 
+# Lambda invocation ad-hoc 출력 (working dir)
+/cs-apps-*.json
+/cwe-*.json
+/cwe-response.json
+/exploit-*.json
+/kisa-*.json
+/psirt-*.json
+/trivy-*.json
+/vex-*.json
+/test_asset_hash.txt
+
 # Test / Coverage
 .pytest_cache/
 htmlcov/

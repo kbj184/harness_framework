@@ -24,6 +24,8 @@ DDL_FILES = [
     "src/agents/psirt_collector/ddl.sql",          # tb_vendor_advisory 인덱스 추가
     "src/agents/trivy_scan/ddl.sql",               # tb_asset_vulnerability
     "src/agents/vex_collector/ddl.sql",            # tb_vex
+    "src/agents/eos_collector/ddl.sql",            # tb_eos_catalog (신규)
+    "../backend/shcema/ddl/cmdb_tier3_embed.sql",  # Tier 3 임베딩 3종 (신규)
 ]
 
 SECRET_ID = "cmdb/db-writer"
@@ -101,6 +103,8 @@ def main() -> int:
         for table in [
             "tb_cwe_dictionary", "tb_exploit_signal",
             "tb_vendor_advisory", "tb_asset_vulnerability", "tb_vex",
+            "tb_eos_catalog",                       # 신규
+            "tb_rag_cve_desc", "tb_cve_match_pending", "tb_sw_cpe_mapping",  # Tier 3
         ]:
             cur.execute(
                 "SELECT to_regclass(%s) IS NOT NULL", (f"public.{table}",)

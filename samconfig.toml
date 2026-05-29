@@ -23,6 +23,7 @@ image_repositories = [
   "PsirtCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-psirt-collector",
   "TrivyScanFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-trivy-scan",
   "VexCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-vex-collector",
+  "EosCollectorFunction=926776803482.dkr.ecr.ap-northeast-2.amazonaws.com/cmdb-eos-collector",
 ]
 
 [default.build]
