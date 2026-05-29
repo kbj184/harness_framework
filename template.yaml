@@ -66,6 +66,10 @@ Parameters:
     Type: String
     Default: cmdb/psirt/cisco
     Description: Cisco openVuln API OAuth Token (옵션 — 미설정 시 Cisco skip)
+  EosScheduleExpression:
+    Type: String
+    Default: "cron(0 18 ? * SUN *)"
+    Description: endoflife.date EOS/EOSL 수집 (주 1회 일요일 UTC 18:00 = KST 03:00)
   TrivyScanScheduleExpression:
     Type: String
     Default: "cron(30 19 * * ? *)"
@@ -398,6 +402,35 @@ Resources:
       DockerContext: .
       DockerTag: latest
 
+  EosCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-eos-collector-${Environment}"
+      Description: endoflife.date EOL/EOSL → tb_eos_catalog UPSERT (자산 EOSL 판정 입력, SSVC +1)
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref EosScheduleExpression
+            Description: endoflife.date EOS/EOSL 주 1회 수집 (일요일 KST 03:00)
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/eos_collector/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
   # ───────────────────────────────────────────────────────────────────
   # Trivy 매칭 엔진 — ★ CVE 시나리오 핵심
   # 두 종류 EventBridge 트리거:
@@ -701,6 +734,12 @@ Outputs:
   PsirtCollectorFunctionName:
     Description: PSIRT Collector Lambda 함수명
     Value: !Ref PsirtCollectorFunction
+  EosCollectorFunctionArn:
+    Description: EOS Collector Lambda ARN
+    Value: !GetAtt EosCollectorFunction.Arn
+  EosCollectorFunctionName:
+    Description: EOS Collector Lambda 함수명
+    Value: !Ref EosCollectorFunction
   TrivyScanFunctionArn:
     Description: Trivy Scan Lambda ARN
     Value: !GetAtt TrivyScanFunction.Arn
