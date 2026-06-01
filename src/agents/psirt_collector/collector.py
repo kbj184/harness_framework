@@ -41,6 +41,34 @@ CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 VERSION_PATTERN = re.compile(r"\b\d+(?:\.\d+){1,3}(?:\.x)?\b")
 
 
+# Cisco productNames → 표준 cpe_product 정규화 (LIKE 매칭 호환)
+CISCO_PRODUCT_NORMALIZE: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"ios\s*xe",          re.IGNORECASE), "ios_xe"),
+    (re.compile(r"nx-?os",            re.IGNORECASE), "nx-os"),
+    (re.compile(r"asa\b",             re.IGNORECASE), "asa"),
+    (re.compile(r"firepower",         re.IGNORECASE), "firepower"),
+    (re.compile(r"meraki",            re.IGNORECASE), "meraki"),
+    (re.compile(r"webex",             re.IGNORECASE), "webex"),
+    (re.compile(r"catalyst",          re.IGNORECASE), "ios"),
+    (re.compile(r"\bios\b",           re.IGNORECASE), "ios"),
+]
+
+
+def normalize_cisco_products(product_names: list[str]) -> str | None:
+    """Cisco productNames 리스트 → cpe_product LIKE 매칭 가능한 정규화 문자열.
+
+    예: ["Cisco IOS XE Software", "Catalyst 9200"] → "ios_xe, ios"
+    """
+    normalized: list[str] = []
+    for name in product_names:
+        for pattern, product in CISCO_PRODUCT_NORMALIZE:
+            if pattern.search(name):
+                if product not in normalized:
+                    normalized.append(product)
+                break
+    return ", ".join(normalized) if normalized else None
+
+
 @dataclass
 class PsirtAdvisory:
     advisory_id: str
@@ -125,7 +153,11 @@ def parse_cisco_advisories(data: dict[str, Any]) -> list[PsirtAdvisory]:
         cve_ids = adv.get("cves") or _extract_cves(title + " " + summary)
         sir = (adv.get("sir") or "").strip().lower() or None   # Critical/High/Medium/Low
         product_names = adv.get("productNames") or []
-        affected_model = ", ".join(product_names) if product_names else None
+        # cpe_product (ios_xe, ios, asa 등) 와 LIKE 매칭되도록 정규화 — 원본은 raw 도 보존
+        affected_model = (
+            normalize_cisco_products(product_names) or
+            (", ".join(product_names) if product_names else None)
+        )
         affected_version = extract_affected_versions(summary) or None
 
         items.append(PsirtAdvisory(
@@ -187,6 +219,28 @@ def parse_psirt_rss(
         cve_ids = _extract_cves(title + " " + description)
         affected_version = extract_affected_versions(title + " " + description) or None
 
+        # vendor_source 별 기본 affected_model — 자산 cpe_product LIKE 매칭 호환
+        # 제목에 명시된 제품 우선, 없으면 vendor 기본값
+        combined = (title + " " + description).lower()
+        if vendor_source == "PSIRT_F5":
+            if "big-ip" in combined or "bigip" in combined:
+                affected_model = "big-ip"
+            elif "nginx" in combined:
+                affected_model = "nginx"
+            else:
+                affected_model = "big-ip"
+        elif vendor_source == "PSIRT_PA":
+            if "pan-os" in combined:
+                affected_model = "pan-os"
+            elif "prisma" in combined:
+                affected_model = "prisma"
+            elif "globalprotect" in combined:
+                affected_model = "globalprotect"
+            else:
+                affected_model = "pan-os"
+        else:
+            affected_model = None
+
         items.append(PsirtAdvisory(
             advisory_id=advisory_id,
             vendor_source=vendor_source,
@@ -194,7 +248,7 @@ def parse_psirt_rss(
             description=description,
             cve_ids=cve_ids,
             severity=None,                        # RSS 에 severity 없음 — 본문 파싱 추후
-            affected_model=None,                  # RSS 에서 모델 추출 어려움
+            affected_model=affected_model,        # cpe_product LIKE 매칭 호환
             affected_version=affected_version,
             source_url=link,
             published_at=_parse_rfc822_date(pub_raw),
@@ -246,6 +300,20 @@ def parse_fortinet_html(html_text: str) -> list[PsirtAdvisory]:
         if advisory_id in seen:
             continue
         seen.add(advisory_id)
+        # 제목에서 FortiOS/FortiManager/FortiAnalyzer 등 세분화 — 없으면 기본 fortios
+        title_low = title.lower()
+        if "fortios" in title_low or "fortigate" in title_low:
+            affected_model = "fortios"
+        elif "fortimanager" in title_low:
+            affected_model = "fortimanager"
+        elif "fortianalyzer" in title_low:
+            affected_model = "fortianalyzer"
+        elif "fortiweb" in title_low:
+            affected_model = "fortiweb"
+        elif "fortinac" in title_low:
+            affected_model = "fortinac"
+        else:
+            affected_model = "fortios"                      # 기본
         items.append(PsirtAdvisory(
             advisory_id=advisory_id,
             vendor_source="PSIRT_FORTI",
@@ -253,7 +321,7 @@ def parse_fortinet_html(html_text: str) -> list[PsirtAdvisory]:
             description="",
             cve_ids=[cve.upper()] if cve else [],
             severity=severity.lower() if severity else None,
-            affected_model="FortiOS / FortiGate",          # 대부분 FortiOS — 본문 fetch 시 정밀화
+            affected_model=affected_model,                  # cpe_product LIKE 매칭 호환
             affected_version=None,
             source_url=f"https://www.fortiguard.com{href}",
             published_at=None,                              # 목록엔 날짜 미명시

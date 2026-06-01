@@ -93,9 +93,23 @@ ON CONFLICT (cve_id) DO UPDATE SET
     upd_dt     = LOCALTIMESTAMP
 """
 
+# 7일 이력 보존 — 매일 갱신분을 tb_epss_history (cve_id, score_date) PK 로 append.
+# 7일 변화량 0.3+ 급상승 감지의 입력. 보존 기간 초과 시 별도 정리 job 으로 prune.
+HISTORY_INSERT_SQL = """
+INSERT INTO tb_epss_history (cve_id, score_date, epss, percentile)
+VALUES (%(cve_id)s, %(score_date)s, %(epss)s, %(percentile)s)
+ON CONFLICT (cve_id, score_date) DO UPDATE SET
+    epss       = EXCLUDED.epss,
+    percentile = EXCLUDED.percentile
+"""
+
+HISTORY_PRUNE_SQL = """
+DELETE FROM tb_epss_history WHERE score_date < CURRENT_DATE - INTERVAL '8 days'
+"""
+
 
 def upsert_epss_rows(conn, rows: list[dict[str, Any]], batch_size: int = 1000) -> int:
-    """executemany 대신 chunk 단위 execute로 대용량 대응."""
+    """executemany 대신 chunk 단위 execute로 대용량 대응. tb_epss_score 현재 점수 갱신."""
     count = 0
     with conn.cursor() as cur:
         for i in range(0, len(rows), batch_size):
@@ -103,3 +117,26 @@ def upsert_epss_rows(conn, rows: list[dict[str, Any]], batch_size: int = 1000) -
             cur.executemany(UPSERT_SQL, chunk)
             count += len(chunk)
     return count
+
+
+def insert_epss_history(
+    conn, rows: list[dict[str, Any]], batch_size: int = 1000
+) -> tuple[int, int]:
+    """tb_epss_history 에 오늘 score_date 의 EPSS 점수 append (UPSERT).
+
+    7일 변화량 감지 입력. score_date 가 NULL 인 행은 skip.
+    반환: (적재된 행수, prune된 행수)
+    """
+    valid = [r for r in rows if r.get("score_date") is not None]
+    inserted = 0
+    pruned = 0
+    with conn.cursor() as cur:
+        # 적재
+        for i in range(0, len(valid), batch_size):
+            chunk = valid[i : i + batch_size]
+            cur.executemany(HISTORY_INSERT_SQL, chunk)
+            inserted += len(chunk)
+        # 보존 기간 초과 prune (8일 이상 지난 행 — 7일 변화량 계산 여유)
+        cur.execute(HISTORY_PRUNE_SQL)
+        pruned = cur.rowcount or 0
+    return inserted, pruned

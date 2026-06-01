@@ -38,44 +38,54 @@ class VexStatement:
 # ───────────────────── CSAF product_tree 평탄화 ─────────────────────
 
 def flatten_product_tree(tree: dict[str, Any]) -> dict[str, dict[str, str | None]]:
-    """CSAF product_tree 의 branches 를 재귀 순회해 product_id → {purl, cpe} 매핑.
+    """CSAF product_tree 전체를 재귀 순회해 product_id → {purl, cpe} 매핑.
 
-    CSAF 2.0 spec 의 product 객체:
-      product.product_id
-      product.product_identification_helper.purl
-      product.product_identification_helper.cpe
+    CSAF 2.0 spec — product 정보는 3 곳에 존재:
+      1. branches[].product (재귀 트리)
+      2. product_tree.relationships[].full_product_name (조합 product)
+      3. product_tree.full_product_names[] (평탄 리스트, Red Hat 활용)
+
+    Red Hat CSAF VEX 는 (2), (3) 에 product 대량 등록 — 이 매퍼가 (1) 만 다루면 매핑 누락.
     """
     mapping: dict[str, dict[str, str | None]] = {}
+
+    def _record(pid: str | None, helper: dict[str, Any] | None) -> None:
+        if not pid or not isinstance(helper, dict):
+            return
+        purl = helper.get("purl")
+        cpe = helper.get("cpe")
+        # 기존 매핑보다 정보가 더 많으면 갱신 (purl/cpe NULL → 채움)
+        existing = mapping.get(pid, {})
+        mapping[pid] = {
+            "purl": purl or existing.get("purl"),
+            "cpe": cpe or existing.get("cpe"),
+        }
 
     def walk(node: dict[str, Any]) -> None:
         product = node.get("product")
         if isinstance(product, dict):
-            pid = product.get("product_id")
-            helper = product.get("product_identification_helper", {}) or {}
-            if pid:
-                mapping[pid] = {
-                    "purl": helper.get("purl"),
-                    "cpe": helper.get("cpe"),
-                }
+            _record(product.get("product_id"),
+                    product.get("product_identification_helper", {}) or {})
         for child in node.get("branches", []) or []:
             walk(child)
-        # relationships 도 product_id 정의 가능
-        for rel in node.get("relationships", []) or []:
-            fp = rel.get("full_product_name", {}) or {}
-            pid = fp.get("product_id")
-            helper = fp.get("product_identification_helper", {}) or {}
-            if pid:
-                mapping[pid] = {
-                    "purl": helper.get("purl"),
-                    "cpe": helper.get("cpe"),
-                }
 
-    # tree 자체가 root branch — branches 키만 진입
+    # (1) 재귀 트리
     for child in tree.get("branches", []) or []:
         walk(child)
-    # 단일 product node (test 의 평탄 구조 대응)
     if tree.get("product"):
         walk(tree)
+
+    # (2) tree-root relationships — full_product_name 에 product_id + helper
+    for rel in tree.get("relationships", []) or []:
+        fp = rel.get("full_product_name", {}) or {}
+        _record(fp.get("product_id"),
+                fp.get("product_identification_helper", {}) or {})
+
+    # (3) tree-root full_product_names — 평탄 리스트 (Red Hat 활용)
+    for fpn in tree.get("full_product_names", []) or []:
+        _record(fpn.get("product_id"),
+                fpn.get("product_identification_helper", {}) or {})
+
     return mapping
 
 

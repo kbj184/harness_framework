@@ -33,6 +33,54 @@ KISA_RSS_URL = KISA_LIST_URL                              # 별칭
 
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
+# 제목에서 제품 키워드 추출 — affected_model 채움 (매칭은 LIKE %cpe_product%)
+# 우선순위 순 (긴 키워드 먼저)
+PRODUCT_KEYWORDS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"한컴(?:오피스)?|hancom", re.IGNORECASE),     "hancom"),
+    (re.compile(r"안랩|ahnlab",            re.IGNORECASE),     "ahnlab"),
+    (re.compile(r"cisco\s*ios\s*xe",       re.IGNORECASE),     "ios_xe"),
+    (re.compile(r"cisco\s*ios",            re.IGNORECASE),     "ios"),
+    (re.compile(r"cisco\s*asa",            re.IGNORECASE),     "asa"),
+    (re.compile(r"cisco",                  re.IGNORECASE),     "cisco"),
+    (re.compile(r"vmware\s*vcenter",       re.IGNORECASE),     "vcenter"),
+    (re.compile(r"vmware",                 re.IGNORECASE),     "vmware"),
+    (re.compile(r"windows\s*server",       re.IGNORECASE),     "windows_server"),
+    (re.compile(r"windows\s*1[01]",        re.IGNORECASE),     "windows"),
+    (re.compile(r"windows|윈도우",          re.IGNORECASE),     "windows"),
+    (re.compile(r"microsoft",              re.IGNORECASE),     "microsoft"),
+    (re.compile(r"chrome",                 re.IGNORECASE),     "chrome"),
+    (re.compile(r"firefox",                re.IGNORECASE),     "firefox"),
+    (re.compile(r"apache",                 re.IGNORECASE),     "apache"),
+    (re.compile(r"nginx",                  re.IGNORECASE),     "nginx"),
+    (re.compile(r"mysql",                  re.IGNORECASE),     "mysql"),
+    (re.compile(r"oracle",                 re.IGNORECASE),     "oracle"),
+    (re.compile(r"openssl",                re.IGNORECASE),     "openssl"),
+    (re.compile(r"openssh",                re.IGNORECASE),     "openssh"),
+    (re.compile(r"java",                   re.IGNORECASE),     "java"),
+    (re.compile(r"node\.?js",              re.IGNORECASE),     "node"),
+    (re.compile(r"adobe",                  re.IGNORECASE),     "adobe"),
+    (re.compile(r"fortinet|forti(?:os|gate)?", re.IGNORECASE), "fortinet"),
+    (re.compile(r"palo\s*alto|pan-os",     re.IGNORECASE),     "paloaltonetworks"),
+    (re.compile(r"f5\s+big-?ip|big-?ip",   re.IGNORECASE),     "big-ip"),
+    (re.compile(r"f5",                     re.IGNORECASE),     "f5"),
+    (re.compile(r"juniper",                re.IGNORECASE),     "juniper"),
+    (re.compile(r"sonicwall",              re.IGNORECASE),     "sonicwall"),
+    (re.compile(r"리눅스|linux",           re.IGNORECASE),     "linux"),
+    (re.compile(r"우분투|ubuntu",          re.IGNORECASE),     "ubuntu"),
+    (re.compile(r"centos|레드햇|redhat",   re.IGNORECASE),     "redhat"),
+    (re.compile(r"맥(?:os|북)|macos",      re.IGNORECASE),     "macos"),
+    (re.compile(r"안드로이드|android",     re.IGNORECASE),     "android"),
+    (re.compile(r"ios(?!\s*xe|s)",         re.IGNORECASE),     "iphone_os"),
+]
+
+
+def extract_product_keyword(title: str) -> str | None:
+    """제목에서 첫 번째 매칭되는 제품 키워드 반환 (없으면 None)."""
+    for pattern, product in PRODUCT_KEYWORDS:
+        if pattern.search(title):
+            return product
+    return None
+
 # 게시물 행 매칭 — <tr> 안에 num/title/date 컬럼이 순서대로
 ROW_RE = re.compile(
     r'<tr[^>]*>\s*'
@@ -142,7 +190,7 @@ def parse_kisa_rss(html_text: str) -> list[KisaAdvisory]:
         items.append(KisaAdvisory(
             advisory_id=extract_advisory_id(href),
             title=title,
-            description="",                     # 목록 페이지엔 본문 없음
+            description=extract_product_keyword(title) or "",   # affected_model 추론용
             cve_ids=list(cve_set.keys()),
             source_url=href,
             published_at=pub_date,
@@ -153,15 +201,19 @@ def parse_kisa_rss(html_text: str) -> list[KisaAdvisory]:
 
 
 def transform_kisa(items: list[KisaAdvisory]) -> list[dict[str, Any]]:
-    """KisaAdvisory → DB upsert dict."""
+    """KisaAdvisory → DB upsert dict.
+
+    description 필드에 extract_product_keyword 결과를 저장했음. 이것을 affected_model 로
+    노출 → KISA cross-ref 매칭 SQL 에서 LIKE '%' || cpe_product || '%' 매칭 가능.
+    """
     return [
         {
             "advisory_id": a.advisory_id,
             "vendor_source": "KISA",
-            "severity": None,                       # KISA RSS 에 severity 없음 — 추후 본문 파싱
+            "severity": None,                       # KISA 본문 파싱 — 추후
             "title": a.title,
-            "overview": a.description,
-            "affected_model": None,                 # KISA SW advisory (네트워크 X)
+            "overview": a.title,                    # 목록 페이지엔 본문 없음 → 제목 재사용
+            "affected_model": a.description or None,    # 제품 키워드 (hancom/windows/cisco 등)
             "affected_version": None,
             "fix_command": None,
             "cve_ids": a.cve_ids,
