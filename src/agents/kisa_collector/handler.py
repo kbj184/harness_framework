@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from src.agents.kisa_collector.collector import (
+    enrich_with_detail,
     fetch_kisa_rss,
     parse_kisa_rss,
     transform_kisa,
@@ -30,6 +31,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     try:
         rss_text = fetch_kisa_rss()
         items = parse_kisa_rss(rss_text)
+        # 본문 fetch 로 cve_ids + affected 보강 (목록 페이지엔 정보 없음)
+        items = enrich_with_detail(items, max_items=50)
         rows = transform_kisa(items)
 
         cfg = dbm.load_db_config()

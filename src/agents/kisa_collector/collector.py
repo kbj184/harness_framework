@@ -152,6 +152,128 @@ def fetch_kisa_rss(url: str = KISA_LIST_URL, timeout: int = 60) -> str:
     return text
 
 
+def fetch_kisa_detail(view_url: str, timeout: int = 30) -> str:
+    """KISA 보안공지 상세 페이지 다운로드 (CVE/영향제품 추출용)."""
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        resp = client.get(view_url)
+        resp.raise_for_status()
+        return resp.text
+
+
+# 본문에서 영향제품/영향버전/심각도 추출용 정규식
+SEVERITY_RE = re.compile(
+    r"(긴급|높음|중요|중간|낮음|critical|high|medium|moderate|low)",
+    re.IGNORECASE,
+)
+# "영향받는 제품"/"영향제품"/"영향버전" 키워드 인근의 텍스트 추출
+AFFECTED_BLOCK_RE = re.compile(
+    r"영향(?:\s*받는)?\s*(?:제품|버전|소프트웨어|시스템)[\s\S]{0,500}",
+)
+# 버전 패턴 (3.14.2, 17.9, v1.2.3, 3.x 등)
+VERSION_PATTERN = re.compile(r"\b\d+(?:\.\d+){1,3}(?:\.x)?\b")
+
+SEVERITY_NORMALIZE = {
+    "긴급":      "critical",
+    "critical":  "critical",
+    "높음":      "high",
+    "high":      "high",
+    "중요":      "high",
+    "중간":      "medium",
+    "medium":    "medium",
+    "moderate":  "medium",
+    "낮음":      "low",
+    "low":       "low",
+}
+
+
+def parse_kisa_detail(detail_html: str) -> dict[str, Any]:
+    """KISA 본문 HTML → cve_ids + affected_model + affected_version + severity 추출.
+
+    반환: {cve_ids: [...], affected_model: str|None, affected_version: str|None, severity: str|None}
+    """
+    text = _strip_tags(detail_html)   # HTML 태그 제거 + entity decode
+
+    # CVE 추출 (중복 제거)
+    cve_set: dict[str, None] = {}
+    for m in CVE_PATTERN.finditer(detail_html):
+        cve_set[m.group(0).upper()] = None
+    cve_ids = list(cve_set.keys())
+
+    # 영향제품/버전 블록 추출
+    affected_block = ""
+    block_m = AFFECTED_BLOCK_RE.search(text)
+    if block_m:
+        affected_block = block_m.group(0)
+
+    # 영향제품 — 제품 키워드 추출 (블록 우선, 없으면 전체 텍스트)
+    affected_model = extract_product_keyword(affected_block) or extract_product_keyword(text)
+
+    # 영향버전 — 영향 블록에서 버전 패턴 추출
+    versions: list[str] = []
+    if affected_block:
+        for m in VERSION_PATTERN.finditer(affected_block):
+            v = m.group(0)
+            if v not in versions:
+                versions.append(v)
+            if len(versions) >= 5:        # 최대 5개
+                break
+    affected_version = ", ".join(versions) if versions else None
+
+    # 심각도
+    severity = None
+    sev_m = SEVERITY_RE.search(text)
+    if sev_m:
+        key = sev_m.group(1).lower()
+        severity = SEVERITY_NORMALIZE.get(key)
+
+    return {
+        "cve_ids": cve_ids,
+        "affected_model": affected_model,
+        "affected_version": affected_version,
+        "severity": severity,
+    }
+
+
+def enrich_with_detail(
+    items: list[KisaAdvisory], *, max_items: int = 50, timeout: int = 30
+) -> list[KisaAdvisory]:
+    """각 KisaAdvisory 의 source_url 본문을 fetch 해서 cve_ids 등 보강.
+
+    이미 cve_ids 가 있는 항목은 fetch 후 합산(append). 최대 max_items 까지 처리.
+    """
+    enriched: list[KisaAdvisory] = []
+    for idx, item in enumerate(items[:max_items]):
+        try:
+            html_text = fetch_kisa_detail(item.source_url, timeout=timeout)
+            detail = parse_kisa_detail(html_text)
+
+            # cve_ids 합산 (제목 + 본문 dedupe)
+            merged = list(dict.fromkeys((item.cve_ids or []) + detail["cve_ids"]))
+            # affected_model — title 추출이 우선, 없으면 detail
+            new_desc = item.description or detail["affected_model"] or ""
+
+            enriched.append(KisaAdvisory(
+                advisory_id=item.advisory_id,
+                title=item.title,
+                description=new_desc,
+                cve_ids=merged,
+                source_url=item.source_url,
+                published_at=item.published_at,
+            ))
+            logger.debug(
+                "KISA detail %s — cve=%d, model=%s, ver=%s, sev=%s",
+                item.advisory_id, len(merged),
+                detail["affected_model"], detail["affected_version"], detail["severity"],
+            )
+        except Exception:
+            logger.exception("KISA detail fetch 실패 — skip: %s", item.advisory_id)
+            enriched.append(item)
+    if len(items) > max_items:
+        enriched.extend(items[max_items:])
+    logger.info("KISA detail enrich %d/%d 완료", min(len(items), max_items), len(items))
+    return enriched
+
+
 def _strip_tags(s: str) -> str:
     """간단 HTML 태그 제거 + entity decode."""
     s = re.sub(r"<[^>]+>", "", s)
@@ -236,13 +358,15 @@ INSERT INTO tb_vendor_advisory (
     %(cve_ids)s, %(source_url)s, %(published_at)s, %(updated_at)s, NOW()
 )
 ON CONFLICT (advisory_id) DO UPDATE SET
-    title           = EXCLUDED.title,
-    overview        = EXCLUDED.overview,
-    severity        = COALESCE(EXCLUDED.severity, tb_vendor_advisory.severity),
-    cve_ids         = EXCLUDED.cve_ids,
-    source_url      = EXCLUDED.source_url,
-    updated_at      = EXCLUDED.updated_at,
-    fetched_at      = NOW()
+    title            = EXCLUDED.title,
+    overview         = EXCLUDED.overview,
+    severity         = COALESCE(EXCLUDED.severity, tb_vendor_advisory.severity),
+    affected_model   = COALESCE(EXCLUDED.affected_model, tb_vendor_advisory.affected_model),
+    affected_version = COALESCE(EXCLUDED.affected_version, tb_vendor_advisory.affected_version),
+    cve_ids          = EXCLUDED.cve_ids,
+    source_url       = EXCLUDED.source_url,
+    updated_at       = EXCLUDED.updated_at,
+    fetched_at       = NOW()
 """
 
 
