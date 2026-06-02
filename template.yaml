@@ -82,6 +82,18 @@ Parameters:
     Type: String
     Default: "cron(0 19 ? * SUN *)"
     Description: VEX 통합 수집 (주 1회 일요일 UTC 19:00 = KST 04:00 월요일)
+  VulnMatchTriggerScheduleExpression:
+    Type: String
+    Default: "rate(15 minutes)"
+    Description: v2 매칭 파이프라인 자동 트리거 주기 (KEV/EPSS/Exploit 신규 신호 즉시 반영)
+  BackendVulnMatchUrl:
+    Type: String
+    Default: "http://nlb-portal-front-b9f3dcbdc6f16f6f.elb.ap-northeast-2.amazonaws.com/api/cmdb/vuln-match/trigger-v2"
+    Description: 백엔드 v2 매칭 endpoint URL (Lambda 가 호출)
+  SlaBreachScheduleExpression:
+    Type: String
+    Default: "cron(0 0 * * ? *)"
+    Description: SLA breach 알림 주기 (UTC 00:00 = KST 09:00 — 업무 시작 시각에 운영 채널로 발송)
   CsAlertsScheduleExpression:
     Type: String
     Default: "rate(15 minutes)"
@@ -432,6 +444,76 @@ Resources:
       DockerTag: latest
 
   # ───────────────────────────────────────────────────────────────────
+  # v2 매칭 자동 트리거 — EventBridge → /api/cmdb/vuln-match/trigger-v2 POST
+  # 신규 KEV/EPSS/Exploit 신호 반영을 자동화 (15분 주기 기본)
+  # ───────────────────────────────────────────────────────────────────
+  VulnMatchTriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-vuln-match-trigger-${Environment}"
+      Description: v2 매칭 파이프라인 자동 트리거 (백엔드 /trigger-v2 호출)
+      Timeout: 240                      # 4분 — v2 파이프라인 응답 대기 (Trivy import + KISA/PSIRT + VEX + SSVC)
+      MemorySize: 256
+      Environment:
+        Variables:
+          BACKEND_VULN_MATCH_URL: !Ref BackendVulnMatchUrl
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref VulnMatchTriggerScheduleExpression
+            Description: v2 매칭 자동 실행 (기본 15분 주기 — KEV/EPSS/Exploit 신호 즉시 반영)
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/vuln_match_trigger/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  # ───────────────────────────────────────────────────────────────────
+  # SLA Breach Notifier — P0-A/B/C action_due 초과 시 SNS 발행
+  # 이메일/Slack 구독은 SnsSlaBreachTopic 에 운영팀이 별도 attach
+  # ───────────────────────────────────────────────────────────────────
+  SnsSlaBreachTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "cmdb-sla-breach-${Environment}"
+      DisplayName: CMDB SLA Breach
+
+  SlaBreachNotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-sla-breach-notifier-${Environment}"
+      Description: P0-A/B/C action_due 초과 자산 추출 → SNS 발행 (운영 채널 알림)
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+          SLA_BREACH_TOPIC_ARN: !Ref SnsSlaBreachTopic
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+            - Effect: Allow
+              Action: sns:Publish
+              Resource: !Ref SnsSlaBreachTopic
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref SlaBreachScheduleExpression
+            Description: SLA breach 알림 (기본 일 1회 KST 09:00)
+            Enabled: true
+    Metadata:
+      Dockerfile: src/agents/sla_breach_notifier/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  # ───────────────────────────────────────────────────────────────────
   # Trivy 매칭 엔진 — ★ CVE 시나리오 핵심
   # 두 종류 EventBridge 트리거:
   #   (1) 일 1회 전체 자산 스캔 (TrivyScanScheduleExpression)
@@ -761,3 +843,12 @@ Outputs:
   AssetEnrichBucketName:
     Description: ECS Ansible 보강 결과 S3 버킷 이름
     Value: !Ref AssetEnrichBucket
+  SlaBreachNotifierFunctionArn:
+    Description: SLA Breach Notifier Lambda ARN
+    Value: !GetAtt SlaBreachNotifierFunction.Arn
+  SlaBreachNotifierFunctionName:
+    Description: SLA Breach Notifier Lambda 함수명
+    Value: !Ref SlaBreachNotifierFunction
+  SnsSlaBreachTopicArn:
+    Description: SLA Breach SNS 토픽 ARN (이메일/Slack 구독 대상)
+    Value: !Ref SnsSlaBreachTopic
