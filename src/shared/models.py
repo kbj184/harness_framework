@@ -16,6 +16,7 @@ class AssetSource(StrEnum):
     SCCM = "SCCM"
     AWS = "AWS"
     AWS_EC2 = "AWS_EC2"
+    EXCEL = "EXCEL"  # ISMS-P 정보자산 대장 일괄 적재 (수기 단일소스, D5)
 
 
 class CommonAsset(BaseModel):

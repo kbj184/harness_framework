@@ -19,6 +19,7 @@ class TestAssetSource:
             AssetSource.SCCM,
             AssetSource.AWS,
             AssetSource.AWS_EC2,
+            AssetSource.EXCEL,
         }
 
 
