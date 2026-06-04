@@ -102,6 +102,10 @@ Parameters:
     Type: String
     Default: "cron(0 19 * * ? *)"
     Description: CrowdStrike Apps (Discover) 수집 스케줄 (UTC 19:00 = KST 04:00, 일 1회)
+  AssetRawBucketName:
+    Type: String
+    Default: gsretail-asset-raw
+    Description: 수집기(aws/crowdstrike)가 CommonAsset JSONL.gz 를 적재하는 raw 버킷 (수집 → S3 → asset_parser → tb_asset)
   SbomBucketName:
     Type: String
     Default: gsretail-sbom
@@ -117,12 +121,11 @@ Resources:
     Properties:
       PackageType: Image
       FunctionName: !Sub "cmdb-crowdstrike-collector-${Environment}"
-      Description: CrowdStrike Hosts API에서 디바이스 자산을 수집하여 백엔드에 전송
+      Description: CrowdStrike Hosts API에서 디바이스 자산을 수집하여 S3 raw 버킷에 적재 (asset_parser 가 소비)
       Environment:
         Variables:
           CS_SECRET_NAME: !Ref CrowdStrikeSecretName
-          BACKEND_SECRET_NAME: !Ref BackendSecretName
-          BATCH_SIZE: "500"
+          ASSET_RAW_BUCKET: !Ref AssetRawBucketName
       Policies:
         - Statement:
             - Effect: Allow
@@ -130,7 +133,11 @@ Resources:
                 - secretsmanager:GetSecretValue
               Resource:
                 - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${CrowdStrikeSecretName}-*"
-                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${BackendSecretName}-*"
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource:
+                - !Sub "arn:aws:s3:::${AssetRawBucketName}/*"
       Events:
         ScheduleEvent:
           Type: Schedule
@@ -148,11 +155,11 @@ Resources:
     Properties:
       PackageType: Image
       FunctionName: !Sub "cmdb-aws-ec2-collector-${Environment}"
-      Description: 대상 AWS 계정의 EC2 인스턴스를 수집하여 백엔드에 전송
+      Description: 대상 AWS 계정의 EC2 인스턴스를 수집하여 S3 raw 버킷에 적재 (asset_parser 가 소비)
       Environment:
         Variables:
           AWS_TARGET_SECRET_NAME: !Ref AwsTargetSecretName
-          BACKEND_SECRET_NAME: !Ref BackendSecretName
+          ASSET_RAW_BUCKET: !Ref AssetRawBucketName
       Policies:
         - Statement:
             - Effect: Allow
@@ -160,7 +167,11 @@ Resources:
                 - secretsmanager:GetSecretValue
               Resource:
                 - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AwsTargetSecretName}-*"
-                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${BackendSecretName}-*"
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource:
+                - !Sub "arn:aws:s3:::${AssetRawBucketName}/*"
       Events:
         ScheduleEvent:
           Type: Schedule
@@ -654,6 +665,76 @@ Resources:
       DockerContext: .
       DockerTag: latest
 
+  # ───────────────────────────────────────────────────────────────────
+  # asset_parser — Phase 2 수집 디커플링
+  # 수집기(aws/crowdstrike)가 S3 raw 버킷에 적재한 CommonAsset JSONL.gz 를
+  # s3:ObjectCreated 로 받아 tb_asset 에 UPSERT. 실패 객체는 failed/ 격리.
+  # prod→dev 이관 시 AssetRawBucket 스냅샷만 복사 후 Parser 재실행 → 동일 재구성.
+  # ───────────────────────────────────────────────────────────────────
+  AssetParserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      FunctionName: !Sub "cmdb-asset-parser-${Environment}"
+      Description: S3 raw CommonAsset JSONL.gz (S3 PutObject) → tb_asset UPSERT
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}-*"
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject     # failed/ 격리 복사
+              Resource:
+                - !Sub "arn:aws:s3:::${AssetRawBucketName}/*"
+      Events:
+        AssetRawUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref AssetRawBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .jsonl.gz
+    Metadata:
+      Dockerfile: src/agents/asset_parser/Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  AssetRawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref AssetRawBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TieringAndExpiry
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 90        # 90일 후 Glacier (재처리/스냅샷 보존)
+            ExpirationInDays: 365
+            NoncurrentVersionExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
   SbomIngestFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -786,6 +867,18 @@ Outputs:
   CrowdStrikeAppsCollectorFunctionName:
     Description: CrowdStrike Apps Collector Lambda 함수명
     Value: !Ref CrowdStrikeAppsCollectorFunction
+  AssetParserFunctionArn:
+    Description: Asset Parser Lambda ARN
+    Value: !GetAtt AssetParserFunction.Arn
+  AssetParserFunctionName:
+    Description: Asset Parser Lambda 함수명
+    Value: !Ref AssetParserFunction
+  AssetRawBucketArn:
+    Description: 자산 raw 적재 S3 버킷 ARN (수집기 PutObject 대상, prod→dev 스냅샷 원천)
+    Value: !GetAtt AssetRawBucket.Arn
+  AssetRawBucketName:
+    Description: 자산 raw 적재 S3 버킷 이름
+    Value: !Ref AssetRawBucket
   SbomIngestFunctionArn:
     Description: SBOM Ingest Lambda ARN
     Value: !GetAtt SbomIngestFunction.Arn

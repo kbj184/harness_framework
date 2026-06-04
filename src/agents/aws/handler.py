@@ -10,16 +10,19 @@ import boto3
 
 from src.agents.aws.collector import AwsEc2Collector
 from src.agents.aws.transformer import transform_instances
-from src.shared.api_client import BackendApiClient
-from src.shared.config import load_aws_target_config, load_backend_config
+from src.shared.config import load_aws_target_config
 from src.shared.logging_config import setup_logging
-from src.shared.models import AssetSource, BulkAssetPayload
+from src.shared.models import AssetSource
+from src.shared.s3_client import put_assets
 
 logger = setup_logging()
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """AWS EC2 인스턴스를 수집하여 백엔드에 전송한다.
+    """AWS EC2 인스턴스를 수집하여 S3 raw 버킷에 적재한다.
+
+    Phase 0(백엔드 bulk API 직행) → Phase 2(S3 → Parser) 전환.
+    적재된 JSONL.gz 는 asset_parser 가 s3:ObjectCreated 로 소비.
 
     Event 지원 필드:
         filters: EC2 describe_instances Filters 리스트 (선택).
@@ -31,9 +34,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     logger.info("AWS EC2 자산 수집 시작", extra={"agent": "aws_ec2"})
 
     try:
-        # 1. 설정 로드 (대상 AWS 자격증명 + 백엔드 API)
+        # 1. 대상 AWS 자격증명 로드
         target = load_aws_target_config()
-        backend = load_backend_config()
 
         # 2. 대상 AWS EC2 client 생성 (cross-account Access Key)
         ec2 = boto3.client(
@@ -50,7 +52,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         if not instances:
             logger.info("수집된 EC2 인스턴스 없음", extra={"agent": "aws_ec2"})
-            return _result(collected_at, 0, 0, 0, start_time)
+            return _result(collected_at, 0, None, start_time)
 
         # 4. CommonAsset으로 변환
         assets = transform_instances(instances, collected_at)
@@ -60,32 +62,10 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             extra={"agent": "aws_ec2", "count": len(assets)},
         )
 
-        # 5. 백엔드 API로 배치 전송
-        api_client = BackendApiClient(
-            base_url=backend.base_url,
-            api_key=backend.api_key,
-            timeout=backend.timeout_seconds,
-        )
+        # 5. S3 raw 버킷에 JSONL.gz 적재 (Parser 가 s3:ObjectCreated 로 소비)
+        s3_key = put_assets(assets, AssetSource.AWS_EC2.value, collected_at)
 
-        batch_size = 500
-        total_created = 0
-        total_updated = 0
-
-        for i in range(0, len(assets), batch_size):
-            batch = assets[i : i + batch_size]
-            payload = BulkAssetPayload(source=AssetSource.AWS_EC2, collected_at=collected_at, assets=batch)
-            response = api_client.send_assets(payload)
-            total_created += response.created_count
-            total_updated += response.updated_count
-            logger.info(
-                "배치 전송 완료 (%d~%d): created=%d, updated=%d",
-                i,
-                i + len(batch),
-                response.created_count,
-                response.updated_count,
-            )
-
-        return _result(collected_at, len(assets), total_created, total_updated, start_time)
+        return _result(collected_at, len(assets), s3_key, start_time)
 
     except Exception as e:
         duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -104,16 +84,14 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 def _result(
     collected_at: datetime,
     total: int,
-    created: int,
-    updated: int,
+    s3_key: str | None,
     start_time: float,
 ) -> dict[str, Any]:
     duration_ms = int((time.monotonic() - start_time) * 1000)
     logger.info(
-        "AWS EC2 자산 수집 완료: total=%d, created=%d, updated=%d, duration=%dms",
+        "AWS EC2 자산 수집 완료: total=%d, s3_key=%s, duration=%dms",
         total,
-        created,
-        updated,
+        s3_key,
         duration_ms,
         extra={"agent": "aws_ec2", "count": total, "duration_ms": duration_ms},
     )
@@ -121,7 +99,6 @@ def _result(
         "status": "SUCCESS",
         "collected_at": collected_at.isoformat(),
         "total_count": total,
-        "created_count": created,
-        "updated_count": updated,
+        "s3_key": s3_key,
         "duration_ms": duration_ms,
     }

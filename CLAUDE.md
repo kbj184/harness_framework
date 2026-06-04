@@ -11,7 +11,7 @@
 
 ## 아키텍처 규칙
 - CRITICAL: 모든 에이전트는 `src/agents/{agent_name}/` 하위에 독립적으로 구현한다. 에이전트 간 직접 import 금지.
-- CRITICAL: **자산(asset) 수집** 결과는 반드시 백엔드 API (`POST /api/cmdb/assets/bulk`)를 경유한다 (`aws`, `crowdstrike` 에이전트). 그 외 외부 피드/임베딩 등 자산이 아닌 데이터(`kev_collector`, `epss_collector`, `nvd_collector`, `crowdstrike_alerts`, `rag_embedder`)는 `src/shared/db.py`로 DB 직접 접근 허용.
+- CRITICAL: **자산(asset) 수집**(`aws`, `crowdstrike`)은 결과를 **S3 raw 버킷(`ASSET_RAW_BUCKET`)에 JSONL.gz 로 적재**한다 (`src/shared/s3_client.py`의 `put_assets`). `asset_parser` 가 `s3:ObjectCreated` 로 받아 `tb_asset` 에 UPSERT(`src/shared/db.py` 직접 접근). 수집 → S3 → 파서 → DB 구조 — **수집기가 백엔드 API/DB 를 직접 호출하지 않는다** (Phase 2; 이전 Phase 0 의 `POST /api/cmdb/assets/bulk` 직행은 폐기). S3 가 환경 간 원천이라 prod→dev 이관은 버킷 스냅샷 복사 + dev 파서 재실행으로 처리. 그 외 외부 피드/임베딩 등 자산이 아닌 데이터(`kev_collector`, `epss_collector`, `nvd_collector`, `crowdstrike_alerts`, `rag_embedder`)는 `src/shared/db.py`로 DB 직접 접근.
 - CRITICAL: CrowdStrike API 자격 증명은 반드시 AWS Secrets Manager에서 로드한다. 코드에 하드코딩 금지.
 - 공통 코드는 `src/shared/`에 위치한다 (models, config, api_client, logging).
 - 각 에이전트의 Lambda 진입점은 `handler.py`의 `lambda_handler(event, context)` 함수이다.
@@ -40,8 +40,9 @@ sam deploy                       # AWS 배포 (samconfig.toml 사용)
 
 | 에이전트 | 역할 | 데이터 흐름 |
 |---|---|---|
-| `aws` | EC2 인스턴스 수집 | boto3 → 백엔드 `POST /api/cmdb/assets/bulk` |
-| `crowdstrike` | CrowdStrike Hosts API 디바이스 수집 | falconpy → 백엔드 API |
+| `aws` | EC2 인스턴스 수집 | boto3 → S3 raw (JSONL.gz) → `asset_parser` |
+| `crowdstrike` | CrowdStrike Hosts API 디바이스 수집 | falconpy → S3 raw (JSONL.gz) → `asset_parser` |
+| `asset_parser` | S3 raw CommonAsset 적재 (S3 트리거) | S3 `s3:ObjectCreated` → `tb_asset` UPSERT, 실패 시 `failed/` 격리 |
 | `crowdstrike_alerts` | CrowdStrike Alerts v2 수집 (15분 주기) | falconpy → `tb_cs_alert` 직접 upsert + 자산 매칭 |
 | `kev_collector` | CISA KEV 카탈로그 수집 | httpx → `tb_kev_catalog` 직접 upsert |
 | `epss_collector` | FIRST EPSS 점수 수집 | httpx CSV → DB 직접 upsert |

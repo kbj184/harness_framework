@@ -115,6 +115,11 @@ def load_backend_config() -> BackendApiConfig:
     return _load_backend_config()
 
 
+def load_crowdstrike_config() -> CrowdStrikeConfig:
+    """CrowdStrike 설정만 독립 로드 (S3 적재 모드 — backend 시크릿 불요)."""
+    return _load_crowdstrike_config()
+
+
 @lru_cache(maxsize=1)
 def load_config() -> AppConfig:
     """애플리케이션 전체 설정을 로드한다. Lambda invocation당 1회만 실행."""
