@@ -57,6 +57,20 @@ def main():
         for row in cur.fetchall():
             print(f"  {row[0] or 'NULL':20s} {row[1]:>5}")
 
+        # 6) ★ cpe_vendor 미적재 네트워크/보안 장비 — populate_asset_cpe 매핑 작성용
+        #    (NVD 보조가 안 걸리는 어플라이언스: Ruckus/Juniper/Aruba/Citrix/Broadcom/Infoblox 등)
+        print("\n=== HW_NET/HW_SEC where cpe_vendor IS NULL (manufacturer | model | os_name) ===")
+        cur.execute("""SELECT manufacturer, model, os_name, COUNT(*)
+                       FROM tb_asset_master
+                       WHERE category_cd IN ('HW_NET', 'HW_SEC')
+                         AND (cpe_vendor IS NULL OR cpe_vendor = '')
+                       GROUP BY manufacturer, model, os_name
+                       ORDER BY 4 DESC""")
+        rows = cur.fetchall()
+        print(f"  (총 {len(rows)} 패턴)")
+        for row in rows:
+            print(f"  {(row[0] or '-'):18s} | {(row[1] or '-'):28s} | {(row[2] or '-'):22s} | {row[3]:>4}")
+
     conn.close()
     return 0
 

@@ -38,6 +38,7 @@ _CPE_STD: dict[str, tuple[str, str]] = {
     "cisco_ios": ("cisco", "ios"),
     "cisco_iosxe": ("cisco", "ios_xe"),
     "cisco_nxos": ("cisco", "nx-os"),
+    "cisco_asa": ("cisco", "adaptive_security_appliance_software"),
     "junos": ("juniper", "junos"),
     "fortios": ("fortinet", "fortios"),
     "panos": ("paloaltonetworks", "pan-os"),
@@ -50,18 +51,23 @@ _CPE_MANUAL: dict[str, tuple[str, str]] = {
     "smartzone": ("ruckuswireless", "smartzone"),
     "fastiron": ("ruckuswireless", "fastiron"),
     "ironware": ("brocade", "ironware"),
+    "brocade_nos": ("brocade", "network_operating_system"),
     "nios": ("infoblox", "nios"),
     "netscaler": ("citrix", "netscaler_application_delivery_controller"),
     "bigip": ("f5", "big-ip"),
 }
-# 국산·NVD 미커버 → cpe_unmapped + KISA/수동 경로
-_NO_CPE: set[str] = {"lena", "secureos", "secui", "tos", "selfsecure"}
+# 국산·OEM·NVD 미커버 → cpe_unmapped + KISA/수동 경로
+_NO_CPE: set[str] = {
+    "lena", "secureos", "secui", "tos", "selfsecure",
+    "somansa",   # 소만사 DLP (국산)
+    "alaxala",   # LG히타치 = ALAXALA(일본 OEM), NVD CPE 부재
+}
 
 # OS류 토큰 (CPE part 'o'), 나머지는 'a'
 _OS_TOKENS = {
     "rhel", "aix", "windows", "rocky", "ubuntu", "centos", "oracle_linux",
-    "esxi", "hpux", "cisco_ios", "cisco_iosxe", "cisco_nxos", "junos",
-    "fortios", "panos", "screenos", "arubaos",
+    "esxi", "hpux", "cisco_ios", "cisco_iosxe", "cisco_nxos", "cisco_asa", "junos",
+    "fortios", "panos", "screenos", "arubaos", "brocade_nos",
 }
 
 # (substring 매칭, canonical token) — 구체적인 것 먼저
@@ -82,13 +88,19 @@ _ALIASES: list[tuple[str, str]] = [
     ("aix", "aix"), ("rocky", "rocky"), ("ubuntu", "ubuntu"),
     ("centos", "centos"), ("windows", "windows"),
     ("esxi", "esxi"), ("hp-ux", "hpux"), ("hpux", "hpux"),
+    # ★ 구체 토큰 먼저, 짧은 "ios"는 맨 뒤 — NIOS/FortiOS/SecuiOS 가 "ios"로 오매칭되는 것 방지
     ("iosxe", "cisco_iosxe"), ("ios xe", "cisco_iosxe"), ("ios-xe", "cisco_iosxe"),
-    ("nx-os", "cisco_nxos"), ("nxos", "cisco_nxos"), ("ios", "cisco_ios"),
+    ("nx-os", "cisco_nxos"), ("nxos", "cisco_nxos"), ("asa", "cisco_asa"),
     ("junos", "junos"), ("fortios", "fortios"), ("pan-os", "panos"),
     ("screenos", "screenos"), ("arubaos", "arubaos"), ("aruba", "arubaos"),
     ("smartzone", "smartzone"), ("fastiron", "fastiron"), ("ironware", "ironware"),
-    ("nios", "nios"), ("netscaler", "netscaler"), ("big-ip", "bigip"), ("bigip", "bigip"),
-    ("secui", "secui"), ("secureos", "secureos"), ("자체", "selfsecure"),
+    ("nios", "nios"), ("netscaler", "netscaler"), ("ns-ox", "netscaler"),
+    # "nos"(Brocade VDX): Junos/ScreenOS/NIOS 뒤
+    ("nos", "brocade_nos"), ("big-ip", "bigip"), ("bigip", "bigip"),
+    ("secui", "secui"), ("secureos", "secureos"), ("somansa", "somansa"),
+    ("tos", "tos"), ("os-l3a", "alaxala"),
+    ("ios", "cisco_ios"),                       # 짧은 토큰 — 위 *ios 전부 뒤
+    ("자체", "selfsecure"),
 ]
 
 _VER_RE = re.compile(r"(\d+(?:\.\d+)+)")

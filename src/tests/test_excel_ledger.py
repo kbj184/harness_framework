@@ -159,6 +159,23 @@ def test_cpe_manual_and_no_cpe_and_unknown():
     assert unk.tier == "UNKNOWN" and unk.unmapped
 
 
+def test_cpe_appliance_os_mappings():
+    """ISMS 시트5·6 실 OS값 → 정확한 벤더. 짧은 'ios' 오매칭(NIOS/FortiOS) 회귀 방지."""
+    # 오매칭 버그 회귀 방지 — 'ios' 가 아닌 고유 벤더로
+    assert cpe_for("NIOS").vendor == "infoblox"
+    assert cpe_for("FortiOS").vendor == "fortinet"
+    # 신규 추가 매핑
+    asa = cpe_for("ASA OS")
+    assert asa.vendor == "cisco" and asa.product == "adaptive_security_appliance_software"
+    assert cpe_for("NOS").vendor == "brocade"            # Brocade VDX
+    assert cpe_for("NS-OX").vendor == "citrix"           # Netscaler OS 변형
+    # 국산·OEM → NO_CPE(unmapped, KISA行)
+    assert cpe_for("Linux 4.14.128-2somansa2.el7").tier == "NO_CPE"
+    assert cpe_for("OS-L3A-A").unmapped is True          # LG히타치 = ALAXALA OEM
+    # 짧은 ios 는 여전히 동작
+    assert cpe_for("IOS").product == "ios"
+
+
 def test_parser_populates_cpe_and_unmapped_flag():
     spec = _spec("SW_WAS")
     headers = {5: "자산명(hostname)", 6: "APP 서비스", 9: "S/W"}
