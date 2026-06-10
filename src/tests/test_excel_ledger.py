@@ -172,6 +172,11 @@ def test_cpe_windows_desktop_browsers():
     # OS 구성요소·AV 정의는 매핑 안 됨(UNKNOWN) → cpe_uri 안 채워져 매칭 제외
     assert cpe_for("Malware Protection", "1.451.193.0").tier == "UNKNOWN"
     assert cpe_for("Jscript", "5.812.10240.16384").tier == "UNKNOWN"
+    # 이름에 'Chrome/Edge'가 든 확장프로그램·컴포넌트(저버전) → 브라우저 오인 거부
+    assert cpe_for("nmmhkkegccagdldgiimedpiccmgmieda-Google Chrome", "1.0.0.6").tier == "UNKNOWN"
+    assert cpe_for("jmjflgjpcpepeafmmgdpfkogkghcpiha-Microsoft Edge", "1.2.1").tier == "UNKNOWN"
+    assert cpe_for("Edge", "1.3.237.7").tier == "UNKNOWN"  # WebView 컴포넌트
+    assert cpe_for("Chrome", "").tier == "UNKNOWN"          # 무버전 브라우저도 거부
 
 
 def test_cpe_appliance_os_mappings():

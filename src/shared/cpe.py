@@ -66,6 +66,10 @@ _NO_CPE: set[str] = {
     "somansa",   # 소만사 DLP (국산)
     "alaxala",   # LG히타치 = ALAXALA(일본 OEM), NVD CPE 부재
 }
+# 브라우저 토큰의 최소 정상 메이저 버전 — 이보다 낮으면 브라우저가 아니라
+# 이름에 'Chrome/Edge'가 들어간 확장프로그램·WebView 컴포넌트(버전 1.x)로 보고 매핑 거부.
+# 가짜 저버전이 모든 수정버전보다 낮아 CVE 전체를 끌어오는 오탐 방지.
+_BROWSER_MIN_MAJOR: dict[str, int] = {"chrome": 30, "edge": 30, "firefox": 20}
 
 # OS류 토큰 (CPE part 'o'), 나머지는 'a'
 _OS_TOKENS = {
@@ -160,6 +164,12 @@ def cpe_for(product_raw: str, version_raw: str = "") -> CpeResult:
         return CpeResult(None, None, None, None, "UNKNOWN", True)
 
     version = extract_version(version_raw, product_raw)
+    # 브라우저는 정상 메이저 버전이 있어야 매핑 — 저버전(확장/컴포넌트)·무버전은 오탐원
+    min_major = _BROWSER_MIN_MAJOR.get(token)
+    if min_major is not None:
+        major = int(version.split(".")[0]) if version else 0
+        if major < min_major:
+            return CpeResult(None, None, None, None, "UNKNOWN", True)
     part = "o" if token in _OS_TOKENS else "a"
     cpe_uri = f"cpe:2.3:{part}:{vendor}:{product}:{version or '*'}:*:*:*:*:*:*:*"
     return CpeResult(cpe_uri, vendor, product, version, tier, False)
