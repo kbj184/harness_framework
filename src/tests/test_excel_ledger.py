@@ -7,8 +7,8 @@ from openpyxl import Workbook
 
 from src.agents.excel_ledger import normalize as nz
 from src.agents.excel_ledger.config import SHEET_SPECS
-from src.agents.excel_ledger.cpe import cpe_for
 from src.agents.excel_ledger.hashing import asset_hash
+from src.shared.cpe import cpe_for
 from src.agents.excel_ledger.parser import HeaderMismatchError, parse_sheet
 
 

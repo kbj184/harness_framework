@@ -9,8 +9,8 @@ from openpyxl import load_workbook
 
 from src.agents.excel_ledger import normalize as nz
 from src.agents.excel_ledger.config import CPE_SOURCE, SHEET_CODE, SHEET_SPECS, SheetSpec
-from src.agents.excel_ledger.cpe import cpe_for
 from src.agents.excel_ledger.hashing import asset_hash
+from src.shared.cpe import cpe_for
 from src.agents.excel_ledger.models import LedgerAsset, SheetStat
 
 logger = logging.getLogger("collect_cmdb")
