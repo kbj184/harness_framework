@@ -16,6 +16,10 @@ _CPE_STD: dict[str, tuple[str, str]] = {
     "nginx": ("f5", "nginx"),
     "websphere": ("ibm", "websphere_application_server"),
     "iis": ("microsoft", "internet_information_services"),
+    # Windows 설치 앱(msi) 중 CVE 빈발 데스크톱 브라우저 — CPE_SW 경로 대상
+    "chrome": ("google", "chrome"),
+    "edge": ("microsoft", "edge_chromium"),
+    "firefox": ("mozilla", "firefox"),
     "oracle_db": ("oracle", "database_server"),
     "sql_server": ("microsoft", "sql_server"),
     "mysql": ("oracle", "mysql"),
@@ -75,6 +79,7 @@ _ALIASES: list[tuple[str, str]] = [
     ("apache tomcat", "tomcat"), ("tomcat", "tomcat"),
     ("httpd", "apache_http"), ("apache", "apache_http"),
     ("nginx", "nginx"), ("websphere", "websphere"), ("iis", "iis"),
+    ("chrome", "chrome"), ("edge", "edge"), ("firefox", "firefox"),
     ("lena", "lena"),
     ("oracle linux", "oracle_linux"), ("oracle", "oracle_db"),
     ("ppas", "edb"), ("edb", "edb"), ("enterprisedb", "edb"),

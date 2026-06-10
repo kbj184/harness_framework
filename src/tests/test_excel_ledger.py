@@ -159,6 +159,21 @@ def test_cpe_manual_and_no_cpe_and_unknown():
     assert unk.tier == "UNKNOWN" and unk.unmapped
 
 
+def test_cpe_windows_desktop_browsers():
+    """Windows 설치 앱(msi) 중 CVE 빈발 브라우저 — CPE_SW 매칭 대상."""
+    c = cpe_for("Chrome", "150.0.7850.0")
+    assert c.tier == "STD" and (c.vendor, c.product) == ("google", "chrome")
+    assert c.cpe_uri.startswith("cpe:2.3:a:google:chrome:150.0.7850.0")
+    # Chromium 기반 Edge → edge_chromium (legacy edge 아님)
+    e = cpe_for("Edge", "148.0.3967.96")
+    assert (e.vendor, e.product) == ("microsoft", "edge_chromium")
+    f = cpe_for("Firefox", "128.0")
+    assert (f.vendor, f.product) == ("mozilla", "firefox")
+    # OS 구성요소·AV 정의는 매핑 안 됨(UNKNOWN) → cpe_uri 안 채워져 매칭 제외
+    assert cpe_for("Malware Protection", "1.451.193.0").tier == "UNKNOWN"
+    assert cpe_for("Jscript", "5.812.10240.16384").tier == "UNKNOWN"
+
+
 def test_cpe_appliance_os_mappings():
     """ISMS 시트5·6 실 OS값 → 정확한 벤더. 짧은 'ios' 오매칭(NIOS/FortiOS) 회귀 방지."""
     # 오매칭 버그 회귀 방지 — 'ios' 가 아닌 고유 벤더로
