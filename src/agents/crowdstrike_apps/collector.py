@@ -141,10 +141,11 @@ def upsert_rows(conn, rows: list[dict[str, Any]]) -> int:
     return count
 
 
-# Alerts 와 동일 패턴: agent_id → tb_asset_source(CROWDSTRIKE) → tb_asset_master.asset_id_hash
+# agent_id → tb_asset(CROWDSTRIKE) → tb_asset_master.asset_id_hash
+# tb_asset_source 는 미적재(설계만 존재) — 실제 수집 디바이스는 tb_asset 에 있음.
 MATCH_SQL_SERIAL = """
 UPDATE tb_asset_software a SET asset_id_hash = m.asset_id_hash
-FROM tb_asset_source s, tb_asset_master m
+FROM tb_asset s, tb_asset_master m
 WHERE a.asset_id_hash IS NULL
   AND s.source = 'CROWDSTRIKE' AND s.source_id = a.cs_agent_id
   AND s.serial_number IS NOT NULL AND m.serial_number = s.serial_number
@@ -152,15 +153,15 @@ WHERE a.asset_id_hash IS NULL
 
 MATCH_SQL_HOSTNAME = """
 UPDATE tb_asset_software a SET asset_id_hash = m.asset_id_hash
-FROM tb_asset_source s, tb_asset_master m
+FROM tb_asset s, tb_asset_master m
 WHERE a.asset_id_hash IS NULL
   AND s.source = 'CROWDSTRIKE' AND s.source_id = a.cs_agent_id
-  AND s.hostname IS NOT NULL AND m.hostname = s.hostname
+  AND s.hostname IS NOT NULL AND LOWER(m.hostname) = LOWER(s.hostname)
 """
 
 
 def backfill_asset_match(conn) -> tuple[int, int]:
-    """cs_agent_id 를 tb_asset_source(CROWDSTRIKE) 경유로 tb_asset_master 와 매칭."""
+    """cs_agent_id 를 tb_asset(CROWDSTRIKE) 경유로 tb_asset_master 와 매칭."""
     with conn.cursor() as cur:
         cur.execute(MATCH_SQL_SERIAL)
         by_serial = cur.rowcount
