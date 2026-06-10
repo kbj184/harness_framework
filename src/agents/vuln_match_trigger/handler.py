@@ -1,6 +1,6 @@
 """v2 매칭 파이프라인 자동 트리거 Lambda.
 
-EventBridge 주기 cron 으로 호출됨. 백엔드의 /api/cmdb/vuln-match/trigger-v2 를
+EventBridge 주기 cron 으로 호출됨. 백엔드의 /api/asset/vuln-match/trigger-v2 를
 호출해 Trivy import + KISA/PSIRT 매칭 + VEX dismiss + SSVC v2 + Priority Score
 파이프라인을 실행한다.
 
@@ -25,7 +25,7 @@ logger = setup_logging()
 # 백엔드 매칭 endpoint — 환경변수 BACKEND_VULN_MATCH_URL 로 override 가능
 DEFAULT_BACKEND_URL = (
     "http://nlb-portal-front-b9f3dcbdc6f16f6f.elb.ap-northeast-2.amazonaws.com"
-    "/api/cmdb/vuln-match/trigger-v2"
+    "/api/asset/vuln-match/trigger-v2"
 )
 
 
