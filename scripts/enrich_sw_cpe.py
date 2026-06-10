@@ -21,10 +21,14 @@ from src.shared.cpe import cpe_for
 from src.shared.db import connect, load_db_config
 
 # cpe_uri 미적재 SW 의 distinct 식별자 (대량 UPDATE 회피 — 시그니처 단위)
+# Trivy(purl) 가 이미 커버하는 배포판/언어 패키지(rpm/deb/npm/...)는 제외 — CPE 는
+# Trivy 가 못 잡는 SW(Windows=msi→pkg:generic, purl 없음)에만 의미가 있다.
 SELECT_SQL = """
 SELECT DISTINCT name, vendor, version
   FROM tb_asset_software
  WHERE cpe_uri IS NULL AND name IS NOT NULL
+   AND COALESCE(ecosystem, '') NOT IN
+       ('rpm', 'deb', 'apk', 'npm', 'pypi', 'maven', 'golang', 'gem', 'nuget')
 """
 
 UPDATE_SQL = """
@@ -33,6 +37,8 @@ UPDATE tb_asset_software
  WHERE cpe_uri IS NULL
    AND name = %(name)s
    AND COALESCE(version, '') = COALESCE(%(version)s, '')
+   AND COALESCE(ecosystem, '') NOT IN
+       ('rpm', 'deb', 'apk', 'npm', 'pypi', 'maven', 'golang', 'gem', 'nuget')
 """
 
 
