@@ -46,10 +46,11 @@ _COLS = (
     "category_cd", "env_type", "lifecycle_state",
     "source_count", "confidence_score", "last_seen", "attributes",
     "cpe_vendor", "cpe_product", "cpe_version", "criticality_score", "isms_yn",
+    "owner_dept", "owner_user_nm",
 )
 
 _TEMPLATE = (
-    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
     "'Y',0,LOCALTIMESTAMP,0,LOCALTIMESTAMP)"
 )
 
@@ -77,6 +78,8 @@ ON CONFLICT (asset_id_hash) DO UPDATE SET
     cpe_version       = EXCLUDED.cpe_version,
     criticality_score = EXCLUDED.criticality_score,
     isms_yn           = EXCLUDED.isms_yn,
+    owner_dept        = EXCLUDED.owner_dept,
+    owner_user_nm     = EXCLUDED.owner_user_nm,
     use_yn            = 'Y',
     upd_dt            = LOCALTIMESTAMP
 """
@@ -113,6 +116,7 @@ def _row(a: LedgerAsset, collected_at: datetime) -> tuple:
         100,                     # confidence_score (ISMS 대장 = 신뢰 원천)
         collected_at, psycopg2.extras.Json(_attributes(a)),
         a.cpe_vendor, a.cpe_product, a.cpe_version, a.criticality_score, a.isms_yn,
+        a.owner_dept, a.owner_user_nm,
     )
 
 
